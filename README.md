@@ -258,6 +258,39 @@ to authorise a production change, so a model-written one would be a
 prompt-injection path into that decision: injected telemetry emitting "known
 false alarm" could talk a reviewer out of containing a real breach.
 
+**Check that the queue is still a control.** An approval queue decays into a
+rubber stamp — automation-bias research finds this affects roughly half of SOC
+analysts, and access-governance practice puts the decay at weeks. Kronagent's
+central claim to an auditor is that a human authorises every consequential
+action, so it measures whether that claim still holds:
+
+```bash
+python3 approve.py stats     # exit code 1 if the control looks degraded
+```
+
+```
+  deny rate            4.3%  (1 denied / 23 decided)
+  time to decide       median 4s, p90 4s
+  destructive/irreversible decided   23
+    of those, decided in <30s  22 (96%)
+
+  ⚠ THE CONTROL MAY BE DEGRADING:
+    - DENY RATE 4.3% over 23 decisions — the queue has refused almost nothing.
+      A control that never says no is not a control.
+    - 22 of 23 destructive or irreversible actions were decided in under 30s.
+      The planned API calls and rollback plan cannot have been read in that time.
+    - 'alice' made 96% of all decisions — there is effectively no second pair of eyes.
+```
+
+Speed is the number this industry publishes; on its own it is as consistent with
+a rubber stamp as with an efficient queue. Deny rate, time-to-decide on
+*consequential* actions specifically, and reviewer concentration are what
+separate the two. The same numbers are on `GET /api/oversight`, and the console
+shows the warnings above the queue itself — where the person about to approve
+something will actually see them. Each warning is a prompt to look, never a
+verdict: a genuinely clean estate can produce a low deny rate honestly, and only
+someone who knows the environment can say which it is.
+
 **Or grant one action class standing autonomy.** Trust is earned per class, is
 audited, and takes effect with no restart:
 
@@ -396,7 +429,7 @@ kronagent/
 
 run_slice.py           runnable entry point
 promote.py             earn-trust governance CLI
-approve.py             human approval CLI
+approve.py             human approval CLI (incl. `stats` — oversight health)
 halt.py                kill-switch CLI (status / engage / clear a halt)
 operators.py           operator registry admin CLI (identity bootstrap)
 run_console.py         analyst web console server

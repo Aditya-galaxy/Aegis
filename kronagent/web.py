@@ -25,6 +25,7 @@ from .approvals import ApprovalStore, now_iso
 from .allowlist import AllowlistStore, DurationError, parse_duration
 from .audit import AuditLog
 from .insights import insight_tags
+from .oversight import compute_metrics
 from .identity import (
     DEFAULT_TENANT,
     AuthorizationError,
@@ -455,6 +456,20 @@ def list_approvals(request: Request) -> list[Any]:
     return [{**r.model_dump(),
              "insight_tags": [t.model_dump() for t in insight_tags(r)]}
             for r in store.list()]
+
+
+@app.get("/api/oversight")
+def oversight_metrics(request: Request) -> dict[str, Any]:
+    """Is the approval queue still a control, or has it become a formality?
+
+    Speed is the metric every vendor publishes; it is also what rubber-stamping
+    optimises. These are the numbers that distinguish the two.
+    """
+    check_view_permission(request)
+    tenant_id = tenant_scope(request)
+    store = get_approval_store(tenant_id)
+    m = compute_metrics(store.list(status=None))
+    return {**m.model_dump(), "healthy": m.healthy}
 
 
 @app.post("/api/approvals/{request_id}/action")

@@ -35,6 +35,11 @@ from kronagent.config import Settings
 from kronagent.containment import ContainmentExecutor
 from kronagent.identity import AuthContext, AuthorizationError, Permission, resolve_actor
 from kronagent.insights import insight_tags, tag_labels
+from kronagent.oversight import (
+    HASTY_DECISION_SECONDS,
+    MIN_DECISIONS_FOR_SIGNAL,
+    compute_metrics,
+)
 from kronagent.providers import build_containment_adapters
 from kronagent.schemas import AuditRecord, BlastRadius, PolicyDecision
 
@@ -114,6 +119,41 @@ def cmd_show(store: ApprovalStore, args: argparse.Namespace) -> int:
         print(f"    decided by {r.decided_by} at {r.decided_at}: {r.decision_reason}")
     if r.execution_detail:
         print(f"    execution: {r.execution_detail}")
+    return 0
+
+
+def cmd_stats(store: ApprovalStore, args: argparse.Namespace) -> int:
+    """Is the approval queue still a control, or has it become a formality?"""
+    m = compute_metrics(store.list(status=None))
+
+    print(f"Approval oversight — {m.decided} decided, {m.pending} pending\n")
+    print(f"  deny rate            {m.deny_rate:.1%}  ({m.denied} denied / {m.decided} decided)")
+    if m.median_seconds_to_decide is not None:
+        print(f"  time to decide       median {m.median_seconds_to_decide:.0f}s, "
+              f"p90 {m.p90_seconds_to_decide:.0f}s")
+    if m.consequential_decided:
+        print(f"  destructive/irreversible decided   {m.consequential_decided}")
+        print(f"    of those, decided in <{HASTY_DECISION_SECONDS:.0f}s  "
+              f"{m.hasty_consequential} ({m.hasty_rate:.0%})")
+
+    if m.by_operator:
+        print("\n  by operator:")
+        for st in m.by_operator:
+            print(f"    {st.operator_id:20} {st.decided:4} decided  "
+                  f"{st.denied:3} denied ({st.deny_rate:.0%})  {st.hasty:3} hasty")
+
+    if m.warnings:
+        print("\n  ⚠ THE CONTROL MAY BE DEGRADING:")
+        for w in m.warnings:
+            print(f"    - {w}")
+        # Non-zero so this can run from cron and page someone.
+        return 1
+
+    if m.decided < MIN_DECISIONS_FOR_SIGNAL:
+        print(f"\n  (fewer than {MIN_DECISIONS_FOR_SIGNAL} decisions — no rate here "
+              f"means anything yet)")
+    else:
+        print("\n  No degradation signals.")
     return 0
 
 
@@ -222,6 +262,12 @@ def main() -> int:
     p_show = sub.add_parser("show", help="show one request in full")
     p_show.add_argument("request_id")
 
+    sub.add_parser(
+        "stats",
+        help="oversight health: deny rate, time-to-decide, hasty approvals "
+             "(exits 1 if the control looks degraded)",
+    )
+
     # Identity flags shared by the mutating commands. In unauthenticated mode
     # (no registry) pass --by. In enforced mode (registry configured) pass
     # --as <operator_id> and a token (--token or KRONAGENT_OPERATOR_TOKEN).
@@ -244,6 +290,8 @@ def main() -> int:
         return cmd_list(store, args)
     if args.command == "show":
         return cmd_show(store, args)
+    if args.command == "stats":
+        return cmd_stats(store, args)
     if args.command == "approve":
         actor = _resolve(settings, audit, args, Permission.APPROVE)
         return cmd_approve(store, audit, settings, actor, args)

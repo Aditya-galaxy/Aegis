@@ -450,3 +450,57 @@ def test_siem_export_endpoint(test_env) -> None:
 
 
 
+
+
+def _stamp(r: ApprovalRequest, *, status: str, by: str, secs: int, n: int) -> ApprovalRequest:
+    from datetime import datetime, timedelta, timezone
+    base = datetime(2026, 3, 1, 12, tzinfo=timezone.utc)
+    r.status = status
+    r.decided_by = by
+    r.created_at = (base + timedelta(seconds=n)).isoformat()
+    r.decided_at = (base + timedelta(seconds=n + secs)).isoformat()
+    return r
+
+
+def _approval(n: int) -> ApprovalRequest:
+    return ApprovalRequest(
+        finding_id=f"f-{n}",
+        finding_type="Backdoor:EC2/C&CActivity.B",
+        severity=8.0,
+        action_class=ActionClass.TERMINATE_INSTANCE,
+        target="i-1",
+        rationale="test",
+        policy_reason="requires approval",
+        reversible=False,
+        blast_radius="single_resource",
+    )
+
+
+def test_oversight_endpoint_reports_a_healthy_queue(test_env) -> None:
+    client, store, _, _ = test_env
+    for i in range(15):
+        store.add(_stamp(_approval(i), status="approved", by="alice", secs=600, n=i))
+    for i in range(15, 25):
+        store.add(_stamp(_approval(i), status="denied", by="bob", secs=600, n=i))
+
+    body = client.get("/api/oversight").json()
+    assert body["decided"] == 25
+    assert body["deny_rate"] == 0.4
+    assert body["median_seconds_to_decide"] == 600.0
+    assert body["healthy"] is True
+    assert body["warnings"] == []
+
+
+def test_oversight_endpoint_exposes_a_degrading_control(test_env) -> None:
+    """The console must be able to show that its own oversight has decayed —
+    the numbers are useless if only a CLI nobody runs can see them."""
+    client, store, _, _ = test_env
+    for i in range(25):
+        store.add(_stamp(_approval(i), status="approved", by="alice", secs=3, n=i))
+
+    body = client.get("/api/oversight").json()
+    assert body["healthy"] is False
+    assert body["deny_rate"] == 0.0
+    assert body["hasty_consequential"] == 25
+    assert any("DENY RATE" in w for w in body["warnings"])
+    assert {s["operator_id"] for s in body["by_operator"]} == {"alice"}

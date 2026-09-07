@@ -114,6 +114,10 @@
                         <h2>Human-in-the-Loop Approval Queue</h2>
                         <span class="badge" id="queue-pending-count">0 Pending</span>
                     </div>
+                    <!-- Oversight health. Shown above the queue on purpose:
+                         the person about to approve something is exactly who
+                         needs to know the queue has stopped refusing things. -->
+                    <div id="oversight-banner" style="display:none"></div>
                     <div class="empty-state" id="queue-empty-state">
                         🎉 All caught up! No pending containment actions require human approval.
                     </div>
