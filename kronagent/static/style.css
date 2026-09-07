@@ -889,3 +889,40 @@ code {
     margin-top: 6px;
     line-height: 1.5;
 }
+
+/* Oversight banner — the queue telling you it may have stopped being a control.
+   Styled as a warning, not an error: the numbers are a prompt to look, and only
+   someone who knows the estate can say whether a low deny rate is degradation
+   or an unusually clean environment. */
+.oversight-banner {
+    border: 1px solid #b45309;
+    border-left: 4px solid #f59e0b;
+    background: rgba(245, 158, 11, 0.08);
+    border-radius: 6px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+}
+.oversight-head {
+    font-weight: 600;
+    color: #f59e0b;
+    margin-bottom: 10px;
+}
+.oversight-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    margin-bottom: 10px;
+    font-size: 0.85rem;
+    opacity: 0.9;
+}
+.oversight-stat strong {
+    font-size: 1.05rem;
+    margin-right: 4px;
+}
+.oversight-warnings {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 0.85rem;
+    line-height: 1.5;
+}
+.oversight-warnings li { margin-bottom: 6px; }

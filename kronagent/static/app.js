@@ -10,6 +10,7 @@ document.addEventListener("DOMContentLoaded", () => {
         approvals: [],
         audit: [],
         allowlist: [],
+        oversight: null,
         operatorId: sessionStorage.getItem("kronagent_operator_id") || "",
         token: sessionStorage.getItem("kronagent_operator_token") || ""
     };
@@ -39,6 +40,7 @@ document.addEventListener("DOMContentLoaded", () => {
         overviewEmptyState: document.getElementById("overview-empty-state"),
         queueList: document.getElementById("queue-list"),
         queueEmptyState: document.getElementById("queue-empty-state"),
+        oversightBanner: document.getElementById("oversight-banner"),
         auditBody: document.getElementById("audit-table-body"),
         auditSearch: document.getElementById("audit-search"),
         allowlistBody: document.getElementById("allowlist-table-body"),
@@ -150,6 +152,27 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     };
 
+    // Operator ids come from an external registry (or an OIDC claim), so they
+    // reach the warning strings from outside. Escape before injecting.
+    const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+
+    // Whether the approval queue is still functioning as a control. Deliberately
+    // rendered above the queue rather than on a separate dashboard: a metric
+    // about rubber-stamping is worth nothing if you have to go looking for it.
+    const fetchOversight = async () => {
+        try {
+            const res = await fetch("/api/oversight", {
+                headers: getHeaders()
+            });
+            state.oversight = await res.json();
+            updateOversightUI();
+        } catch (e) {
+            console.error("Failed fetching oversight metrics", e);
+        }
+    };
+
     const fetchAudit = async () => {
         try {
             const res = await fetch("/api/audit", {
@@ -224,6 +247,35 @@ document.addEventListener("DOMContentLoaded", () => {
             elements.navPendingBadge.style.display = "none";
             elements.queuePendingCount.textContent = "0 Pending";
         }
+    };
+
+    const updateOversightUI = () => {
+        const m = state.oversight;
+        const el = elements.oversightBanner;
+        if (!m || !el) return;
+
+        if (m.healthy) {
+            el.style.display = "none";
+            return;
+        }
+        const stat = (label, value) => `<span class="oversight-stat">
+            <strong>${value}</strong> ${label}</span>`;
+        const decideTime = m.median_seconds_to_decide === null
+            ? "—"
+            : `${Math.round(m.median_seconds_to_decide)}s`;
+
+        el.style.display = "block";
+        el.className = "oversight-banner";
+        el.innerHTML = `
+            <div class="oversight-head">⚠ This approval queue may no longer be a control</div>
+            <div class="oversight-stats">
+                ${stat("deny rate", (m.deny_rate * 100).toFixed(1) + "%")}
+                ${stat("decisions", m.decided)}
+                ${stat("median time to decide", decideTime)}
+            </div>
+            <ul class="oversight-warnings">
+                ${m.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}
+            </ul>`;
     };
 
     const updateApprovalsUI = () => {
@@ -747,6 +799,7 @@ document.addEventListener("DOMContentLoaded", () => {
             fetchAudit();
         } else if (state.activeTab === "queue") {
             fetchApprovals();
+            fetchOversight();
         } else if (state.activeTab === "audit") {
             fetchAudit();
         } else if (state.activeTab === "allowlist") {
