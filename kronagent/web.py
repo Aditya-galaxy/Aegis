@@ -38,23 +38,6 @@ from .providers import build_containment_adapters
 from .schemas import AuditRecord, PolicyDecision, BlastRadius, ActionClass
 from .ocsf import to_ocsf_event
 from .orchestrator import get_tenant_path
-from .connect import (
-    launch_stack_url,
-)
-
-
-class AwsLinkRequest(BaseModel):
-    account_id: str
-    region: str = "us-east-1"
-    grant: Literal["observe", "contain"] = "observe"
-
-
-class AwsVerifyRequest(BaseModel):
-    account_id: str
-    role_arn: str
-    grant: Literal["observe", "contain"] = "observe"
-
-
 
 # Initialize FastAPI app
 app = FastAPI(title="Kronagent Incident Response Console")
@@ -356,90 +339,6 @@ def export_siem(request: Request) -> dict[str, Any]:
         "total_events": len(ocsf_events),
         "events": ocsf_events
     }
-
-
-@app.post("/api/connect/aws/link")
-def create_aws_link(req: AwsLinkRequest, request: Request) -> dict[str, Any]:
-    """Generate a 1-click CloudFormation launch stack URL for onboarding AWS accounts."""
-    check_view_permission(request)
-    tenant_id = tenant_scope(request)
-    conn_store = ConnectionStore(get_tenant_path(settings.connection_store_path, tenant_id))
-
-    grant = Grant.OBSERVE if req.grant == "observe" else Grant.CONTAIN
-    existing = conn_store.get(tenant_id)
-    if existing and existing.account_id == req.account_id:
-        conn = existing
-    else:
-        conn = conn_store.create(tenant_id=tenant_id, account_id=req.account_id, region=req.region)
-
-    template_url = f"https://s3.amazonaws.com/kronagent-templates-{req.region}/kronagent-{req.grant}-role.json"
-    url = launch_stack_url(conn, grant, template_url=template_url)
-
-    return {
-        "tenant_id": tenant_id,
-        "account_id": conn.account_id,
-        "region": conn.region,
-        "external_id": conn.external_id,
-        "grant": req.grant,
-        "launch_url": url,
-        "state": conn.state.value
-    }
-
-
-@app.post("/api/connect/aws/verify")
-def verify_aws_connection(req: AwsVerifyRequest, request: Request) -> dict[str, Any]:
-    """Record an assumed role ARN and perform live STS AssumeRole preflight verification."""
-    check_view_permission(request)
-    tenant_id = tenant_scope(request)
-    conn_store = ConnectionStore(get_tenant_path(settings.connection_store_path, tenant_id))
-
-    conn = conn_store.get(tenant_id)
-    if not conn or conn.account_id != req.account_id:
-        raise HTTPException(status_code=404, detail=f"No connection found for account {req.account_id}")
-
-    grant = Grant.OBSERVE if req.grant == "observe" else Grant.CONTAIN
-    conn = conn_store.record_role(tenant_id, grant, req.role_arn)
-
-    broker = CredentialBroker()
-    res = preflight(conn, broker)
-    conn = conn_store.record_preflight(tenant_id, res)
-
-    return {
-        "tenant_id": tenant_id,
-        "account_id": conn.account_id,
-        "state": conn.state.value,
-        "grant": req.grant,
-        "role_arn": req.role_arn,
-        "can_contain": conn.can_contain,
-        "missing_permissions": list(res.missing_permissions)
-    }
-
-
-@app.get("/api/connect/status")
-def list_cloud_connections(request: Request) -> list[dict[str, Any]]:
-    """List all registered cloud connections and permission grants for the tenant."""
-    check_view_permission(request)
-    tenant_id = tenant_scope(request)
-    conn_store = ConnectionStore(get_tenant_path(settings.connection_store_path, tenant_id))
-
-    conns = conn_store.list()
-    res = []
-    for c in conns:
-        res.append({
-            "account_id": c.account_id,
-            "region": c.region,
-            "external_id": c.external_id,
-            "state": c.state.value,
-            "observe_role_arn": c.observe_role_arn,
-            "contain_role_arn": c.contain_role_arn,
-            "can_contain": c.can_contain,
-            "last_verified": c.last_verified.isoformat() if c.last_verified else None
-        })
-    return res
-
-
-
-
 
 
 @app.get("/api/approvals")

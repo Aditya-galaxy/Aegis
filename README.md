@@ -223,10 +223,14 @@ no environment variable — because the observe role already carries
 (`KRONAGENT_GUARDDUTY_POLL_SECONDS`, default 60). Every action is planned and
 audited; none execute.
 
-> The `/api/connect/aws/link` endpoint returns a one-click CloudFormation URL,
-> but it points at a template bucket that is **not published yet**, so the link
-> opens a console that cannot load the template. Use the steps above until that
-> ships.
+> There is no one-click "Launch Stack" link. CloudFormation only accepts a
+> `TemplateURL` pointing at S3, and no template bucket is published, so the
+> steps above — download the rendered template, `aws cloudformation deploy` —
+> are the supported path rather than a workaround. They are also the safer one:
+> the rendered template has your External ID and our account id **baked in**, so
+> nothing can be mistyped, and the External ID never leaves your terminal. A
+> pre-filled console link would carry it in a URL, and therefore into browser
+> history and any proxy log along the way.
 
 ### 3. Let it act
 
@@ -525,7 +529,7 @@ While major competing 2026 AI SOC tools (**Dropzone AI**, **Prophet Security**, 
 | **Phase 3: Web Console Real-Time SSE Stream** | Server-Sent Events `/api/events/stream` live status, audit events, and pending approval notifications. | ✅ **Completed** |
 | **Phase 4: Enterprise Auth & OCSF SIEM Export** | Cryptographic audit log verification and `/api/export/siem` REST API for SIEM ingestion. | ✅ **Completed** |
 | **Phase 5: Shadow Mode & Evaluation Harness** | Measured evaluation harness (`run_eval.py`) reporting 100% CDC and 0% FPUA across 26 benchmark cases. | ✅ **Completed** |
-| **Phase 6: Cloud Connection REST APIs & Database Storage Engine** | `/api/connect/aws/link`, `/api/connect/aws/verify`, `/api/connect/status`, and `DatabaseStorageEngine` (`kronagent/storage.py`). | ✅ **Completed** |
+| **Phase 6: Cloud Connection REST APIs & Database Storage Engine** | The tenant-scoped `/api/connections/*` endpoints (list, create, template, role, verify, delete) and `DatabaseStorageEngine` (`kronagent/storage.py`). | ✅ **Completed** |
 
 For the complete architectural design and safety envelope rationale, see [`agent-team-architecture.md`](agent-team-architecture.md) and [`docs/use-cases.md`](docs/use-cases.md).
 
