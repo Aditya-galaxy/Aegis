@@ -262,6 +262,23 @@ to authorise a production change, so a model-written one would be a
 prompt-injection path into that decision: injected telemetry emitting "known
 false alarm" could talk a reviewer out of containing a real breach.
 
+**Prove containment actually works, before trusting it.** The static invariants
+compare IAM action names; they cannot see whether a `Resource` ARN is wide
+enough. Only a real account settles that:
+
+```bash
+python3 run_cloud_drill.py                    # simulation, touches nothing
+KRONAGENT_CLOUD_DRILL_ARM=i-understand-this-creates-and-deletes-real-resources \
+  python3 run_cloud_drill.py --live --tenant acme --with-instances
+```
+
+Each action is executed, verified by an independent read, rolled back, and the
+rollback verified. `--tenant` runs it under that tenant's assumed containment
+role, which is the only mode that exercises the policy a customer actually
+granted. It creates and deletes real IAM users, roles, NACLs and EC2 instances,
+so `--live` requires the environment variable as well as the flag — and prints
+which account it is about to touch before it touches it.
+
 **Check that the queue is still a control.** An approval queue decays into a
 rubber stamp — automation-bias research finds this affects roughly half of SOC
 analysts, and access-governance practice puts the decay at weeks. Kronagent's
