@@ -446,3 +446,95 @@ def test_every_tenant_scoped_endpoint_is_authorized() -> None:
     assert not unguarded, (
         f"these endpoints resolve a tenant without authorizing it: {unguarded}"
     )
+
+
+def _endpoint_blocks() -> list[tuple[str, str, str]]:
+    """Every FastAPI handler in web.py as (method, path, source block)."""
+    import re
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent.parent / "kronagent" / "web.py"
+    blocks = re.split(r'\n(?=@app\.(?:get|post|put|delete|patch)\()',
+                      source.read_text())
+    out = []
+    for block in blocks:
+        m = re.match(r'@app\.(\w+)\("([^"]+)"', block)
+        if m:
+            out.append((m.group(1), m.group(2), block))
+    return out
+
+
+def test_every_mutating_tenant_endpoint_requires_more_than_view() -> None:
+    """The scan above accepts `tenant_scope()` alone. That is right for a read
+    and wrong for a mutation, and the gap was not theoretical.
+
+    `POST /api/connect/aws/verify` performed a real STS AssumeRole into the
+    customer's account and rewrote stored connection state behind
+    `check_view_permission` — and it passed the scan above, because it did call
+    `tenant_scope()`. Viewing an incident and making Kronagent exercise a
+    customer's credentials are not the same authority.
+
+    A mutation must name a permission other than VIEW, or go through
+    `_require()`, which resolves one.
+    """
+    offenders = []
+    for method, path, block in _endpoint_blocks():
+        if method in ("get", "head"):
+            continue
+        if "tenant_id" not in block and "{tenant_id}" not in path:
+            continue
+        elevated = "_require(" in block or any(
+            f"Permission.{p}" in block for p in ("APPROVE", "PROMOTE")
+        )
+        if not elevated:
+            offenders.append(f"{method.upper()} {path}")
+
+    assert not offenders, (
+        f"these endpoints mutate tenant state behind VIEW-level auth: "
+        f"{offenders}. Route them through _require() with the permission the "
+        f"action actually needs."
+    )
+
+
+def test_no_endpoint_returns_a_raw_external_id() -> None:
+    """The enforceable form of the rule stated in web.py's own comments.
+
+    That rule — 'the External ID is a secret and is NEVER returned by a read
+    endpoint' — was a comment, so it did not hold: two handlers returned
+    `conn.external_id` in cleartext, one of them a VIEW-gated GET. A role ARN is
+    not secret (it appears in the customer's own CloudTrail); the ARN and the
+    External ID together are enough to assume their role.
+
+    The one legitimate appearance is inside the rendered CloudFormation
+    template, which is the artifact the customer has to install. Everywhere else
+    it must be `external_id_hint` — the last few characters, enough to confirm
+    you are looking at the right connection and not enough to use.
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent.parent / "kronagent" / "web.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    leaks: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        is_endpoint = any(
+            isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+            and isinstance(d.func.value, ast.Name) and d.func.value.id == "app"
+            for d in node.decorator_list
+        )
+        if not is_endpoint:
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Dict):
+                for key in inner.keys:
+                    if isinstance(key, ast.Constant) and key.value == "external_id":
+                        leaks.append(f"{node.name}() at line {key.lineno}")
+
+    assert not leaks, (
+        f"these handlers return a raw external_id: {leaks}. Return "
+        f"'external_id_hint' (the last few characters) instead — the full value "
+        f"belongs only inside the rendered template the customer installs."
+    )

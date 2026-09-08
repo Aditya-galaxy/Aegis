@@ -190,7 +190,7 @@ The orchestrator and the multi-agent SOC team (Triage, Threat Intel, Correlation
 - [x] **Real-Time Event Streaming (Phase 3)**: Web console Server-Sent Events (`/api/events/stream`) delivering live status, audit events, and pending approval notifications.
 - [x] **Enterprise Auth & OCSF SIEM Export (Phase 4)**: Cryptographic audit log verification and `/api/export/siem` REST API returning OCSF-normalized events for SIEM ingestion (Splunk, Sentinel, Datadog).
 - [x] **Shadow Mode & Evaluation Harness (Phase 5)**: Measured evaluation harness (`run_eval.py`) with Wilson score 95% confidence intervals, 26 benchmark cases across 5 substrates, 100% CDC, and 0% FPUA.
-- [x] **Cloud Connection REST APIs & Database Storage Engine (Phase 6)**: `/api/connect/aws/link`, `/api/connect/aws/verify`, `/api/connect/status` web APIs, and unified `DatabaseStorageEngine` abstraction in `kronagent/storage.py`.
+- [x] **Cloud Connection REST APIs & Database Storage Engine (Phase 6)**: the tenant-scoped `/api/connections/*` web APIs (list, create, template, role, verify, delete), and unified `DatabaseStorageEngine` abstraction in `kronagent/storage.py`.
 - [x] **Kubernetes Helm Chart & Local Sandbox**: Production Helm chart templates (`deploy/helm/`) and Docker Compose SQS emulator sandbox profile (`sqs-emulator`).
 
 ### Upcoming Milestones
