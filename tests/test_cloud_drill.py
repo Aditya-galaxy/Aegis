@@ -35,12 +35,30 @@ REPO = Path(__file__).resolve().parent.parent
 DRILL = REPO / "run_cloud_drill.py"
 
 
+def _installed(mod: str) -> bool:
+    import importlib.util
+    return importlib.util.find_spec(mod) is not None
+
+
+# The drill is an AWS tool and imports boto3 at module scope, so RUNNING it
+# needs the [aws] extra and moto. Only the behavioural tests are gated on that.
+#
+# The structural tests below deliberately are NOT: they parse the source and
+# assert the arming property, which is a claim about our own code that must hold
+# in the core CI job too. Gating the whole file would have switched off the
+# safety guard in the job most likely to run without cloud SDKs.
+needs_aws = pytest.mark.skipif(
+    not (_installed("boto3") and _installed("moto")),
+    reason="running the drill needs boto3 and moto ([aws] and [dev] extras)")
+
+
 def _source() -> str:
     return DRILL.read_text(encoding="utf-8")
 
 
 # --- Arming ------------------------------------------------------------------
 
+@needs_aws
 def test_live_mode_requires_an_explicit_environment_variable():
     """`--live` alone must not be enough, and neither must credentials."""
     res = subprocess.run(
@@ -53,6 +71,7 @@ def test_live_mode_requires_an_explicit_environment_variable():
     assert "CREATES AND DELETES real" in res.stdout
 
 
+@needs_aws
 def test_the_refusal_names_the_account_it_would_have_touched():
     """"Set this variable" is not enough on its own. The question the old
     behaviour never let anyone ask is *which account*, so the refusal answers
@@ -95,6 +114,7 @@ def test_no_path_from_credential_presence_alone_to_a_live_run():
             "Credential presence is not consent.")
 
 
+@needs_aws
 def test_simulation_is_the_default():
     """Running it with no arguments must touch nothing real."""
     res = subprocess.run(
@@ -165,6 +185,7 @@ def test_every_drill_exemption_still_names_a_real_action():
     assert not unknown, f"exempted but no longer an ActionClass: {sorted(unknown)}"
 
 
+@needs_aws
 def test_drill_results_are_machine_readable(tmp_path):
     """So a future CI job can assert on outcomes rather than grepping stdout."""
     import json
@@ -185,6 +206,7 @@ def test_drill_results_are_machine_readable(tmp_path):
             assert detail[key] is True, f"{action} did not record {key}"
 
 
+@needs_aws
 @pytest.mark.parametrize("action", [
     "attach_deny_all_to_principal",
     "disable_access_key",
