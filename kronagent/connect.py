@@ -350,6 +350,55 @@ def launch_stack_url(conn: AwsConnection, grant: Grant, *, template_url: str) ->
 # Assuming the role
 # --------------------------------------------------------------------------- #
 
+# --- The one place broker credentials become a boto3 client -------------------
+#
+# CredentialBroker.credentials() returns **boto3 keyword arguments**
+# (aws_access_key_id / aws_secret_access_key / aws_session_token), not STS's
+# own Credentials shape (AccessKeyId / SecretAccessKey / SessionToken). The two
+# are trivially confusable and the failure is silent: GuardDutyPollingSource
+# read the STS names, raised KeyError on every single poll, and had that
+# swallowed by the broad handler in its stream loop — so it retried forever
+# behind a 5s->300s backoff. Live ingestion through a connection had therefore
+# never once worked, and a connected tenant looked exactly like a quiet account.
+#
+# Routing every brokered client through here means the shape can only be wrong
+# in one place, and tests/test_credential_shape.py asserts there is only one.
+
+_BOTO3_CREDENTIAL_KWARGS = frozenset(
+    {"aws_access_key_id", "aws_secret_access_key", "aws_session_token"}
+)
+
+
+def boto3_client(service: str, *, region: str,
+                 credentials: Optional[dict] = None) -> Any:
+    """A boto3 client for one service, under brokered or ambient credentials.
+
+    `credentials` is what CredentialBroker.credentials() returned, or None to
+    use the process's own ambient credentials (correct for a local
+    single-account run, never correct for a multi-tenant one).
+
+    An unexpected key is rejected rather than passed through: boto3 would raise
+    a confusing TypeError deep in botocore, and STS-shaped keys arriving here
+    are exactly the bug this function exists to make impossible.
+    """
+    kwargs: dict[str, Any] = {"region_name": region}
+    if credentials:
+        unexpected = set(credentials) - _BOTO3_CREDENTIAL_KWARGS
+        if unexpected:
+            raise ValueError(
+                f"credentials for {service} carry unexpected keys "
+                f"{sorted(unexpected)}; expected boto3 keyword arguments "
+                f"{sorted(_BOTO3_CREDENTIAL_KWARGS)}. STS returns AccessKeyId / "
+                f"SecretAccessKey / SessionToken — pass what "
+                f"CredentialBroker.credentials() returned, not the raw STS "
+                f"response."
+            )
+        kwargs.update(credentials)
+
+    import boto3  # local import: this module stays importable without AWS
+    return boto3.client(service, **kwargs)
+
+
 @dataclass
 class _CachedCredentials:
     access_key_id: str
@@ -484,13 +533,12 @@ def preflight(conn: AwsConnection, broker: CredentialBroker,
     except Exception as exc:  # noqa: BLE001 - surfaced to the customer verbatim
         return PreflightResult(ok=False, error=f"could not assume role: {exc}")
 
-    import boto3
     missing: list[str] = []
     reached_account = ""
 
     for permission, service in _OBSERVE_PROBES:
         try:
-            client = boto3.client(service, region_name=conn.region, **creds)
+            client = boto3_client(service, region=conn.region, credentials=creds)
             if service == "sts":
                 reached_account = client.get_caller_identity()["Account"]
             elif service == "guardduty":

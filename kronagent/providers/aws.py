@@ -237,9 +237,9 @@ class AwsContainmentAdapter:
         if existing is not None:
             return existing
 
-        import boto3
+        from ..connect import boto3_client
         creds = self._credentials_for(tenant_id) if self._credentials_for else None
-        client = boto3.client(service, region_name=self._region, **(creds or {}))
+        client = boto3_client(service, region=self._region, credentials=creds)
         self._clients[key] = client
         return client
 

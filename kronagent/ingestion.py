@@ -249,6 +249,15 @@ class GuardDutyPollingSource:
 
     _POLL_BASE_BACKOFF = 5.0
     _POLL_MAX_BACKOFF = 300.0
+
+    # A network or throttling error is transient and the backoff above is the
+    # right answer. A KeyError, TypeError or ValueError is not transient — it is
+    # a wiring bug that will fail identically on every future poll. Retrying one
+    # forever at the same log level is how a credential-shape mismatch survived
+    # this source's entire lifetime, printing a line every few minutes that
+    # nobody read while the tenant looked simply quiet.
+    _CONFIG_ERROR_TYPES = (KeyError, TypeError, ValueError, AttributeError)
+    _CONFIG_ERRORS_BEFORE_ESCALATING = 3
     # Bounds the dedupe set. Well above any realistic per-poll volume, and
     # bounded so a long-running process cannot grow it without limit.
     _SEEN_LIMIT = 5000
@@ -283,28 +292,41 @@ class GuardDutyPollingSource:
         if self._client_factory is not None:
             return self._client_factory()
         if self._gd is None:
-            import boto3  # local import: module stays importable without AWS
-            kwargs = {"region_name": self._region}
-            if self._credentials is not None:
-                creds = self._credentials()
-                kwargs.update(
-                    aws_access_key_id=creds["AccessKeyId"],
-                    aws_secret_access_key=creds["SecretAccessKey"],
-                    aws_session_token=creds["SessionToken"],
-                )
-            self._gd = boto3.client("guardduty", **kwargs)
+            # Local import: this module stays importable without AWS installed.
+            from .connect import boto3_client
+            self._gd = boto3_client(
+                "guardduty", region=self._region,
+                credentials=self._credentials() if self._credentials else None,
+            )
         return self._gd
 
     async def stream(self, queue: "asyncio.Queue[QueuedFinding]", stop: asyncio.Event) -> None:
         backoff = self._POLL_BASE_BACKOFF
+        config_errors = 0
         while not stop.is_set():
             try:
                 emitted = await asyncio.to_thread(self._poll_once)
                 backoff = self._POLL_BASE_BACKOFF
+                config_errors = 0
             except Exception as exc:  # noqa: BLE001 - a poll error must not kill ingestion
+                if isinstance(exc, self._CONFIG_ERROR_TYPES):
+                    config_errors += 1
+                else:
+                    config_errors = 0
+
+                note = ""
+                if config_errors >= self._CONFIG_ERRORS_BEFORE_ESCALATING:
+                    # Say the thing plainly. Silence from a healthy connection is
+                    # how every wiring gap on this path presents, so the operator
+                    # needs to be told this will not fix itself.
+                    note = (f"  <-- {config_errors} consecutive "
+                            f"{type(exc).__name__}s: this is a CONFIGURATION "
+                            f"ERROR, not a transient one. It will not resolve on "
+                            f"its own, and this tenant is producing NO findings.")
+
                 print(f"[INGEST] GuardDuty poll failed for tenant "
                       f"'{self._tenant_id}', backing off {backoff:.0f}s: "
-                      f"{type(exc).__name__}: {exc}", flush=True)
+                      f"{type(exc).__name__}: {exc}{note}", flush=True)
                 await self._sleep(stop, backoff)
                 backoff = min(backoff * 2, self._POLL_MAX_BACKOFF)
                 continue
