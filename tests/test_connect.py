@@ -191,7 +191,7 @@ def test_containment_policy_is_scoped_to_the_customer_account_and_region() -> No
     # it is exempt by Sid rather than by pattern: EC2 Describe* genuinely has no
     # resource-level permissions, and a pattern-based exemption would quietly
     # cover the next mutation someone grants on "*".
-    read_only = {"ReadStateForRollbackCapture"}
+    read_only = {"ReadStateForRollbackCapture", "ConfirmOwnIdentity"}
     mutations = [s for s in doc["Statement"] if s["Sid"] not in read_only]
     arns = [a for s in mutations
             for a in ([s["Resource"]] if isinstance(s["Resource"], str)
@@ -824,3 +824,144 @@ def test_a_tenant_without_the_containment_stack_never_reaches_aws(tmp_path, monk
 
     broker._sts.assume_role.assert_not_called()
     assert store.get("acme").can_contain is False
+
+
+# --------------------------------------------------------------------------- #
+# Preflight verifies the grant it was asked about
+#
+# preflight() accepted a `grant`, used it to assume the right role, and then ran
+# the OBSERVE probe table regardless. Two silent consequences, both on the only
+# grant that can change a customer's infrastructure:
+#
+#   1. The contain policy granted none of those three permissions, so a
+#      correctly installed contain role reported three missing permissions and
+#      DEGRADED — permanently, with nothing the customer could do about it.
+#   2. It granted no sts:GetCallerIdentity either, so `reached_account` stayed
+#      empty and the account-mismatch guard had nothing to compare. The check
+#      enforcing "containment can only ever touch the account whose finding
+#      produced it" was structurally dead for every contain grant.
+# --------------------------------------------------------------------------- #
+
+def _contain_conn() -> AwsConnection:
+    """A connection where the customer has granted containment as well as read."""
+    return _conn(contain_role_arn=f"arn:aws:iam::{CUSTOMER_ACCOUNT}:role/KronagentContainRole")
+
+
+def _broker_returning_credentials() -> CredentialBroker:
+    broker = CredentialBroker()
+    sts = MagicMock()
+    sts.assume_role.return_value = _sts_response()
+    broker._sts = sts
+    return broker
+
+
+def _client_factory(account: str = CUSTOMER_ACCOUNT, *, deny: set[str] = frozenset()):
+    """A boto3.client stand-in whose calls succeed unless named in `deny`."""
+    seen: list[str] = []
+
+    def fake_client(service, **kwargs):
+        c = MagicMock()
+        for method, perm in (("get_caller_identity", "sts:GetCallerIdentity"),
+                             ("list_detectors", "guardduty:ListDetectors"),
+                             ("describe_instances", "ec2:DescribeInstances"),
+                             ("describe_network_acls", "ec2:DescribeNetworkAcls")):
+            if perm in deny:
+                getattr(c, method).side_effect = RuntimeError("AccessDenied")
+            else:
+                getattr(c, method).side_effect = lambda *a, _p=perm, **k: (
+                    seen.append(_p) or {"Account": account})
+        return c
+
+    return fake_client, seen
+
+
+@requires_boto3
+def test_preflight_probes_the_permissions_the_grant_actually_has(monkeypatch) -> None:
+    """A contain role that is installed correctly must verify as healthy."""
+    import boto3
+    fake, seen = _client_factory()
+    monkeypatch.setattr(boto3, "client", fake)
+
+    result = preflight(_contain_conn(), _broker_returning_credentials(), Grant.CONTAIN)
+
+    assert result.ok is True
+    assert result.missing == [], (
+        "a correctly installed contain role reported missing permissions — "
+        "preflight is probing a grant it does not have")
+    assert result.as_state() is ConnectionState.HEALTHY
+    # It must not have gone looking for GuardDuty under the containment role.
+    assert "guardduty:ListDetectors" not in seen
+
+
+@requires_boto3
+def test_contain_preflight_detects_an_account_mismatch(monkeypatch) -> None:
+    """The guard this whole change exists to bring back to life.
+
+    "Containment can only ever touch the account whose finding produced it" is
+    the product's core safety claim. It was enforced for the read-only grant and
+    unenforced for the one that can disable keys and isolate instances.
+    """
+    import boto3
+    fake, _ = _client_factory(account="999988887777")
+    monkeypatch.setattr(boto3, "client", fake)
+
+    result = preflight(_contain_conn(), _broker_returning_credentials(), Grant.CONTAIN)
+
+    assert result.ok is False
+    assert "999988887777" in result.error
+    assert CUSTOMER_ACCOUNT in result.error
+    assert result.as_state() is ConnectionState.FAILED
+
+
+@requires_boto3
+def test_a_connection_whose_account_cannot_be_read_is_not_healthy(monkeypatch) -> None:
+    """Fail closed.
+
+    Previously an unreadable identity left `reached_account` empty, which made
+    the mismatch check above a no-op and fell through to ok=True with the
+    *recorded* account echoed back — so the one case the guard exists for
+    produced a confident, healthy-looking, entirely unverified connection.
+    """
+    import boto3
+    fake, _ = _client_factory(deny={"sts:GetCallerIdentity"})
+    monkeypatch.setattr(boto3, "client", fake)
+
+    result = preflight(_contain_conn(), _broker_returning_credentials(), Grant.CONTAIN)
+
+    assert result.ok is False
+    assert "could not confirm which account" in result.error
+    assert result.account_id != CUSTOMER_ACCOUNT, (
+        "the recorded account was echoed back as though it had been verified")
+    assert result.as_state() is ConnectionState.FAILED
+
+
+@requires_boto3
+def test_every_grant_has_a_probe_table() -> None:
+    """A grant with no probes would verify as healthy without checking anything.
+
+    Keyed off the Grant enum so adding a third grant fails here rather than
+    silently defaulting to observe's probes — which is exactly how contain came
+    to be verified against permissions it did not have.
+    """
+    from kronagent.connect import _PROBES
+
+    assert set(_PROBES) == set(Grant)
+    for grant, probes in _PROBES.items():
+        assert probes, f"{grant.value} has no preflight probes"
+        assert any(p == "sts:GetCallerIdentity" for p, _, _ in probes), (
+            f"{grant.value} does not probe sts:GetCallerIdentity, so the "
+            f"account-mismatch guard cannot run for it")
+
+
+def test_both_quarantine_ids_reach_the_rendered_template() -> None:
+    """`render_template` grew a second quarantine id when the isolate statement
+    started naming the security group by ARN. A wrapper that forwards one and
+    silently defaults the other renders a role scoped to a placeholder SG —
+    valid JSON, valid ARN syntax, matching nothing, and failing only at
+    containment time."""
+    body = template_json(_contain_conn(), Grant.CONTAIN,
+                         kronagent_account_id=KRONAGENT_ACCOUNT,
+                         quarantine_nacl_id="acl-real", quarantine_sg_id="sg-real")
+    assert "acl-real" in body
+    assert "sg-real" in body
+    assert "QUARANTINE_SG_ID" not in body

@@ -1255,9 +1255,15 @@ async def connection_template(tenant_id: str, grant: str, request: Request) -> d
         )
     return {
         "grant": g.value,
-        "template": render_template(conn, g, kronagent_account_id=account,
-                                    quarantine_nacl_id=settings.quarantine_nacl_id
-                                                       or "QUARANTINE_NACL_ID"),
+        # Both quarantine ids are baked into the rendered ARNs. Unset, they
+        # render as the placeholders deploy/README.md tells the operator to
+        # substitute — which is why they are spelled loudly rather than left
+        # blank: a blank produces a syntactically valid ARN matching nothing,
+        # and the resulting role fails only at containment time.
+        "template": render_template(
+            conn, g, kronagent_account_id=account,
+            quarantine_nacl_id=settings.quarantine_nacl_id or "QUARANTINE_NACL_ID",
+            quarantine_sg_id=settings.quarantine_security_group_id or "QUARANTINE_SG_ID"),
     }
 
 

@@ -45,7 +45,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 _log = logging.getLogger("kronagent.connect")
 
@@ -231,6 +231,17 @@ def _contain_policy(account_id: str, region: str, quarantine_nacl_id: str,
     return {
         "Version": "2012-10-17",
         "Statement": [
+            {
+                # Not a containment capability — the oracle for the check that
+                # this role belongs to the account we think it does. Without it
+                # preflight cannot read back an account id, and the mismatch
+                # guard below silently has nothing to compare, on the one grant
+                # that can actually change the customer's infrastructure.
+                "Sid": "ConfirmOwnIdentity",
+                "Effect": "Allow",
+                "Action": "sts:GetCallerIdentity",
+                "Resource": "*",   # sts:GetCallerIdentity takes no resource
+            },
             {
                 "Sid": "DisableAndReenableAccessKeys",
                 "Effect": "Allow",
@@ -520,14 +531,42 @@ class CredentialBroker:
 # Preflight
 # --------------------------------------------------------------------------- #
 
-# Probed with a dry-run or read-only call each. Kept small on purpose: this runs
-# at connect time and every health check, and a customer waiting on a spinner
-# does not care that we verified thirty permissions.
-_OBSERVE_PROBES: tuple[tuple[str, str], ...] = (
-    ("sts:GetCallerIdentity", "sts"),
-    ("guardduty:ListDetectors", "guardduty"),
-    ("ec2:DescribeInstances", "ec2"),
+# Probed with a read-only call each. Kept small on purpose: this runs at connect
+# time and on every health check, and a customer waiting on a spinner does not
+# care that we verified thirty permissions.
+#
+# Each entry carries its own call. The previous shape — (permission, service) —
+# forced the caller into an if/elif chain keyed on the service string, so the
+# table and the calls it described could drift apart, and a probe added to the
+# table without a matching branch would silently exercise `describe_instances`
+# under someone else's name.
+_Probe = tuple[str, str, "Callable[[Any], Any]"]
+
+_OBSERVE_PROBES: tuple[_Probe, ...] = (
+    ("sts:GetCallerIdentity", "sts", lambda c: c.get_caller_identity()),
+    ("guardduty:ListDetectors", "guardduty", lambda c: c.list_detectors(MaxResults=1)),
+    ("ec2:DescribeInstances", "ec2", lambda c: c.describe_instances(MaxResults=5)),
 )
+
+# The contain role's grant is deliberately narrow and almost entirely writes, so
+# there is no honest read-only probe for most of it. What can be checked is
+# checked; what cannot is stated rather than implied.
+#
+# NOT VERIFIED by this: iam:UpdateAccessKey, iam:PutUserPolicy, iam:PutRolePolicy,
+# ec2:ModifyInstanceAttribute, ec2:CreateNetworkAclEntry. Confirming those means
+# performing them, and a health check must not disable a customer's access key
+# to prove it could. They are covered instead by tests/test_grant_sufficiency.py
+# statically, and by run_cloud_drill.py against a live account.
+_CONTAIN_PROBES: tuple[_Probe, ...] = (
+    ("sts:GetCallerIdentity", "sts", lambda c: c.get_caller_identity()),
+    ("ec2:DescribeInstances", "ec2", lambda c: c.describe_instances(MaxResults=5)),
+    ("ec2:DescribeNetworkAcls", "ec2", lambda c: c.describe_network_acls(MaxResults=5)),
+)
+
+_PROBES: dict[Grant, tuple[_Probe, ...]] = {
+    Grant.OBSERVE: _OBSERVE_PROBES,
+    Grant.CONTAIN: _CONTAIN_PROBES,
+}
 
 
 @dataclass
@@ -564,18 +603,15 @@ def preflight(conn: AwsConnection, broker: CredentialBroker,
     missing: list[str] = []
     reached_account = ""
 
-    for permission, service in _OBSERVE_PROBES:
+    for permission, service, call in _PROBES[grant]:
         try:
             client = boto3_client(service, region=conn.region, credentials=creds)
+            result = call(client)
             if service == "sts":
-                reached_account = client.get_caller_identity()["Account"]
-            elif service == "guardduty":
-                client.list_detectors(MaxResults=1)
-            else:
-                client.describe_instances(MaxResults=5)
+                reached_account = result["Account"]
         except Exception as exc:  # noqa: BLE001
-            _log.warning("preflight probe %s failed for tenant %s: %s",
-                         permission, conn.tenant_id, exc)
+            _log.warning("preflight %s probe %s failed for tenant %s: %s",
+                         grant.value, permission, conn.tenant_id, exc)
             missing.append(permission)
 
     if reached_account and reached_account != conn.account_id:
@@ -585,18 +621,32 @@ def preflight(conn: AwsConnection, broker: CredentialBroker,
                    f"is recorded against {conn.account_id}"),
         )
 
-    return PreflightResult(ok=True, account_id=reached_account or conn.account_id,
-                           missing=missing)
+    if not reached_account:
+        # Fail closed. Previously this fell through to ok=True with the recorded
+        # account echoed back, so a role whose identity could not be read was
+        # reported healthy and the mismatch check above was simply skipped —
+        # exactly the case it exists to catch. "We could not confirm which
+        # account this role belongs to" is not a verified connection.
+        return PreflightResult(
+            ok=False, missing=missing,
+            error=("could not confirm which account this role belongs to "
+                   "(sts:GetCallerIdentity failed), so the connection cannot be "
+                   "verified against the recorded account"),
+        )
+
+    return PreflightResult(ok=True, account_id=reached_account, missing=missing)
 
 
 def template_json(conn: AwsConnection, grant: Grant, *,
                   kronagent_account_id: str,
-                  quarantine_nacl_id: str = "QUARANTINE_NACL_ID") -> str:
+                  quarantine_nacl_id: str = "QUARANTINE_NACL_ID",
+                  quarantine_sg_id: str = "QUARANTINE_SG_ID") -> str:
     """The template as the customer will see it — pretty-printed, because they
     are being asked to read it before granting access."""
     return json.dumps(
         render_template(conn, grant, kronagent_account_id=kronagent_account_id,
-                        quarantine_nacl_id=quarantine_nacl_id),
+                        quarantine_nacl_id=quarantine_nacl_id,
+                        quarantine_sg_id=quarantine_sg_id),
         indent=2,
     )
 

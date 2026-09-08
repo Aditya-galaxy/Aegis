@@ -3,6 +3,12 @@
   "Id": "KronagentContainmentLeastPrivilege",
   "Statement": [
     {
+      "Sid": "ConfirmOwnIdentity",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
       "Sid": "DisableAndReenableAccessKeys",
       "Effect": "Allow",
       "Action": "iam:UpdateAccessKey",
