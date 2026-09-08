@@ -146,7 +146,24 @@ class AwsConnection:
 # that trusts the wrong principal.
 # --------------------------------------------------------------------------- #
 
-def _trust_policy(kronagent_account_id: str, external_id: str) -> dict:
+def partition_for(region: str) -> str:
+    """The ARN partition a region belongs to.
+
+    `_REGION_RE` accepts GovCloud regions, so the code already claims to support
+    them — but every ARN here hardcoded `arn:aws:`, which is the commercial
+    partition only. A GovCloud customer's stack would have created a role whose
+    policy referenced resources that cannot exist, and China regions are the
+    same story under `aws-cn`. cfn-lint flags exactly this (I3042).
+    """
+    if region.startswith("us-gov-"):
+        return "aws-us-gov"
+    if region.startswith("cn-"):
+        return "aws-cn"
+    return "aws"
+
+
+def _trust_policy(kronagent_account_id: str, external_id: str,
+                  partition: str = "aws") -> dict:
     """Who may assume this role, and under what condition.
 
     The sts:ExternalId condition is the whole point. Without it the trust policy
@@ -157,7 +174,7 @@ def _trust_policy(kronagent_account_id: str, external_id: str) -> dict:
         "Version": "2012-10-17",
         "Statement": [{
             "Effect": "Allow",
-            "Principal": {"AWS": f"arn:aws:iam::{kronagent_account_id}:root"},
+            "Principal": {"AWS": f"arn:{partition}:iam::{kronagent_account_id}:root"},
             "Action": "sts:AssumeRole",
             "Condition": {"StringEquals": {"sts:ExternalId": external_id}},
         }],
@@ -219,7 +236,9 @@ def _observe_policy() -> dict:
 
 
 def _contain_policy(account_id: str, region: str, quarantine_nacl_id: str,
-                    quarantine_sg_id: str = "QUARANTINE_SG_ID") -> dict:
+                    quarantine_sg_id: str = "QUARANTINE_SG_ID",
+                    include_terminate: bool = False,
+                    partition: str = "aws") -> dict:
     """Write access, least-privilege, mirroring deploy/kronagent-iam-policy.json.
 
     Deliberately omits ec2:TerminateInstances. Terminate is classified
@@ -235,13 +254,13 @@ def _contain_policy(account_id: str, region: str, quarantine_nacl_id: str,
                 "Sid": "DisableAndReenableAccessKeys",
                 "Effect": "Allow",
                 "Action": "iam:UpdateAccessKey",
-                "Resource": f"arn:aws:iam::{account_id}:user/*",
+                "Resource": f"arn:{partition}:iam::{account_id}:user/*",
             },
             {
                 "Sid": "QuarantineDenyAllInlinePolicyOnly",
                 "Effect": "Allow",
                 "Action": ["iam:PutUserPolicy", "iam:DeleteUserPolicy"],
-                "Resource": f"arn:aws:iam::{account_id}:user/*",
+                "Resource": f"arn:{partition}:iam::{account_id}:user/*",
                 "Condition": {
                     "StringEquals": {"iam:PolicyName": "kronagent-quarantine-deny-all"}
                 },
@@ -250,7 +269,7 @@ def _contain_policy(account_id: str, region: str, quarantine_nacl_id: str,
                 "Sid": "RevokeRoleSessionsInlinePolicyOnly",
                 "Effect": "Allow",
                 "Action": ["iam:PutRolePolicy", "iam:DeleteRolePolicy"],
-                "Resource": f"arn:aws:iam::{account_id}:role/*",
+                "Resource": f"arn:{partition}:iam::{account_id}:role/*",
                 "Condition": {
                     "StringEquals": {"iam:PolicyName": "kronagent-revoke-sessions"}
                 },
@@ -270,6 +289,8 @@ def _contain_policy(account_id: str, region: str, quarantine_nacl_id: str,
                 "Effect": "Allow",
                 "Action": ["ec2:DescribeInstances", "ec2:DescribeNetworkAcls"],
                 "Resource": "*",   # EC2 Describe* does not support resource ARNs
+                # ...so the region condition is the only scope available here.
+                "Condition": {"StringEquals": {"ec2:Region": region}},
             },
             {
                 "Sid": "IsolateInstanceIntoQuarantineSG",
@@ -282,25 +303,147 @@ def _contain_policy(account_id: str, region: str, quarantine_nacl_id: str,
                 # the quarantine SG explicitly also means this role can move an
                 # instance into quarantine and nowhere else.
                 "Resource": [
-                    f"arn:aws:ec2:{region}:{account_id}:instance/*",
-                    f"arn:aws:ec2:{region}:{account_id}:security-group/{quarantine_sg_id}",
+                    f"arn:{partition}:ec2:{region}:{account_id}:instance/*",
+                    f"arn:{partition}:ec2:{region}:{account_id}:security-group/{quarantine_sg_id}",
                 ],
+                # Redundant with the ARNs above, and kept anyway: it was present
+                # in the hand-written standalone policy and absent from both role
+                # templates, which is the kind of asymmetry that makes one copy
+                # quietly weaker than another.
+                "Condition": {"StringEquals": {"ec2:Region": region}},
             },
             {
                 "Sid": "BlockIpAtQuarantineNacl",
                 "Effect": "Allow",
                 "Action": ["ec2:CreateNetworkAclEntry", "ec2:DeleteNetworkAclEntry"],
-                "Resource": f"arn:aws:ec2:{region}:{account_id}:network-acl/{quarantine_nacl_id}",
+                "Resource": f"arn:{partition}:ec2:{region}:{account_id}:network-acl/{quarantine_nacl_id}",
+                "Condition": {"StringEquals": {"ec2:Region": region}},
             },
-        ],
+        ] + ([
+            {
+                # Only for the standalone policy an operator attaches by hand.
+                # The role templates omit it: the point of asking the customer
+                # to read the grant is that most will not want an irreversible
+                # action in it, and anyone who does can add this statement.
+                "Sid": "TerminateInstancesInRegion",
+                "Effect": "Allow",
+                "Action": "ec2:TerminateInstances",
+                "Resource": f"arn:{partition}:ec2:{region}:{account_id}:instance/*",
+                "Condition": {"StringEquals": {"ec2:Region": region}},
+            },
+        ] if include_terminate else []),
     }
+
+
+_COMMON_PARAMETERS = {
+    "KronagentAccountId": {
+        "Type": "String",
+        "Description": "Kronagent's AWS account id — the only principal permitted to assume this role.",
+        "AllowedPattern": "^\\d{12}$",
+    },
+    "ExternalId": {
+        "Type": "String",
+        "Description": "The per-tenant External ID from your Kronagent console. Without it this role could be assumed on behalf of any Kronagent customer.",
+        "MinLength": 16,
+        "MaxLength": 1224,
+        "NoEcho": True,
+    },
+}
+
+_TEMPLATE_PARAMETERS: dict[Grant, dict] = {
+    Grant.OBSERVE: {
+        **_COMMON_PARAMETERS,
+        "RoleName": {"Type": "String", "Default": "KronagentObserveRole",
+                     "Description": "Name of the IAM role to create."},
+    },
+    Grant.CONTAIN: {
+        **_COMMON_PARAMETERS,
+        # No Default on either. They are baked into the granted ARNs, so an
+        # empty value produces a syntactically valid ARN matching nothing —
+        # a role that installs cleanly and fails only at containment time.
+        "QuarantineSecurityGroupId": {
+            "Type": "String",
+            "Description": "The quarantine security group. This role may move an instance into this group and no other.",
+            "AllowedPattern": "^sg-[0-9a-f]+$",
+        },
+        "QuarantineNaclId": {
+            "Type": "String",
+            "Description": "The network ACL Kronagent may add deny entries to. This role can modify no other NACL.",
+            "AllowedPattern": "^acl-[0-9a-f]+$",
+        },
+        "RoleName": {"Type": "String", "Default": "KronagentContainRole",
+                     "Description": "Name of the IAM role to create."},
+    },
+}
+
+
+def _cfn_parameterize(obj: Any, parameters: set[str]) -> Any:
+    """Rewrite `${...}` placeholders into CloudFormation intrinsic functions.
+
+    The policy statements are rendered ONCE, by the same `_observe_policy()` /
+    `_contain_policy()` the baked template uses, with CloudFormation
+    placeholders standing in for the concrete ids. Only this pass differs
+    between the two forms — so the hosted template and the one a customer
+    downloads cannot grant different things, which is precisely what happened
+    when they were maintained as separate files.
+
+    A string that is exactly one template parameter becomes `Ref`; anything else
+    containing a placeholder becomes `Fn::Sub`. Both are correct; `Ref` is what
+    a reviewer expects to see, and this file is written to be read.
+    """
+    if isinstance(obj, dict):
+        return {k: _cfn_parameterize(v, parameters) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_cfn_parameterize(v, parameters) for v in obj]
+    if isinstance(obj, str) and "${" in obj:
+        whole = re.fullmatch(r"\$\{([A-Za-z0-9:]+)\}", obj)
+        if whole and whole.group(1) in parameters:
+            return {"Ref": whole.group(1)}
+        return {"Fn::Sub": obj}
+    return obj
 
 
 def render_template(conn: AwsConnection, grant: Grant, *,
                     kronagent_account_id: str,
                     quarantine_nacl_id: str = "QUARANTINE_NACL_ID",
-                    quarantine_sg_id: str = "QUARANTINE_SG_ID") -> dict:
-    """The CloudFormation template the customer installs for one grant."""
+                    quarantine_sg_id: str = "QUARANTINE_SG_ID",
+                    parameterized: bool = False) -> dict:
+    """The CloudFormation template the customer installs for one grant.
+
+    Two forms, one source of truth for what is granted.
+
+    **Baked (default).** Our account id, the tenant's External ID and the
+    quarantine resource ids are literals in the JSON. This is what the customer
+    downloads and deploys, and it is the safer form: nothing can be omitted or
+    mistyped. A customer who fat-fingers a parameterized `KronagentAccountId`
+    creates a role trusting a stranger's AWS account — a silent, complete
+    confused-deputy compromise, and the exact failure this module exists to
+    prevent.
+
+    **Parameterized.** The same policy statements with CloudFormation
+    parameters in place of those literals, for a template hosted once and
+    installed by many. Required for a one-click console link, which cannot carry
+    a per-tenant template.
+
+    The statements themselves are rendered by the same functions either way. The
+    forms differ only in `_cfn_parameterize`, which is what makes it structurally
+    impossible for the hosted grant and the downloaded grant to mean different
+    things — they were separate files, and had already drifted four ways.
+    """
+    if parameterized:
+        # Locals, not a modified connection: AwsConnection validates its own
+        # account id and External ID, and rightly rejects a placeholder.
+        account_id, region = "${AWS::AccountId}", "${AWS::Region}"
+        external_id = "${ExternalId}"
+        kronagent_account_id = "${KronagentAccountId}"
+        quarantine_nacl_id = "${QuarantineNaclId}"
+        quarantine_sg_id = "${QuarantineSecurityGroupId}"
+        partition = "${AWS::Partition}"
+    else:
+        account_id, region = conn.account_id, conn.region
+        external_id = conn.external_id
+        partition = partition_for(conn.region)
+
     if grant is Grant.OBSERVE:
         policy, role_name, desc = (
             _observe_policy(), "KronagentObserveRole",
@@ -309,25 +452,27 @@ def render_template(conn: AwsConnection, grant: Grant, *,
         )
     else:
         policy, role_name, desc = (
-            _contain_policy(conn.account_id, conn.region, quarantine_nacl_id,
-                            quarantine_sg_id),
+            _contain_policy(account_id, region, quarantine_nacl_id,
+                            quarantine_sg_id, partition=partition),
             "KronagentContainRole",
             "Least-privilege containment access for Kronagent. Install this only "
             "after reviewing the actions below; Kronagent operates read-only "
             "without it.",
         )
 
-    return {
+    params = _TEMPLATE_PARAMETERS[grant] if parameterized else {}
+    body: dict[str, Any] = {
         "AWSTemplateFormatVersion": "2010-09-09",
         "Description": desc,
+        **({"Parameters": params} if params else {}),
         "Resources": {
             "KronagentRole": {
                 "Type": "AWS::IAM::Role",
                 "Properties": {
-                    "RoleName": role_name,
+                    "RoleName": "${RoleName}" if parameterized else role_name,
                     "Description": desc,
                     "AssumeRolePolicyDocument": _trust_policy(
-                        kronagent_account_id, conn.external_id),
+                        kronagent_account_id, external_id, partition),
                     "Policies": [{
                         "PolicyName": f"Kronagent{grant.value.capitalize()}Policy",
                         "PolicyDocument": policy,
@@ -342,6 +487,7 @@ def render_template(conn: AwsConnection, grant: Grant, *,
             },
         },
     }
+    return _cfn_parameterize(body, set(params)) if parameterized else body
 
 
 def launch_stack_url(conn: AwsConnection, grant: Grant, *, template_url: str) -> str:

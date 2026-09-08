@@ -32,18 +32,31 @@ it never needs `create-security-group` / `create-network-acl` privileges.
 
 ## 2. Substitute the placeholders in `kronagent-iam-policy.json`
 
+> **These files are generated.** `deploy/cloudformation/*.json` and
+> `deploy/kronagent-iam-policy.json` are rendered from the policy functions in
+> `kronagent/connect.py` by `deploy/publish_templates.py`, and CI fails on drift.
+> Change the grant there and run `python3 deploy/publish_templates.py --write`.
+>
+> They were three hand-maintained copies of one grant, and they had drifted five
+> ways — including a NACL statement that granted every ACL in the account while
+> the table below promised it granted exactly one. Substitute the placeholders in
+> a *copy*; a hand edit committed here is a CI failure, by design.
+
 | Placeholder | Replace with |
 |---|---|
 | `ACCOUNT_ID` | your 12-digit AWS account id |
 | `REGION` | the operating region, e.g. `us-east-1` (must match `AWS_REGION` / `KRONAGENT_QUARANTINE_SG_ID`'s region) |
 | `QUARANTINE_NACL_ID` | the real `acl-xxxx` id of the quarantine NACL |
+| `QUARANTINE_SG_ID` | the real `sg-xxxx` id of the quarantine security group |
+| `aws` (in `arn:aws:…`) | `aws-us-gov` in GovCloud, `aws-cn` in China regions — leave as-is in commercial regions |
 
 ```bash
-sed -i '' \
+sed \
   -e 's/ACCOUNT_ID/123456789012/g' \
   -e 's/REGION/us-east-1/g' \
   -e 's/QUARANTINE_NACL_ID/acl-0abc123/g' \
-  deploy/kronagent-iam-policy.json
+  -e 's/QUARANTINE_SG_ID/sg-0def456/g' \
+  deploy/kronagent-iam-policy.json > my-kronagent-policy.json
 ```
 
 ## 3. Attach the policy to a dedicated Kronagent principal

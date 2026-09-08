@@ -1,41 +1,49 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
-  "Description": "Kronagent Read-Only (Observe) Cross-Account IAM Role for Threat Detection & Triage",
+  "Description": "Read-only access for Kronagent to ingest and investigate findings. Grants no ability to change anything in this account.",
   "Parameters": {
     "KronagentAccountId": {
       "Type": "String",
-      "Description": "AWS Account ID of the Kronagent platform (e.g. 123456789012)",
+      "Description": "Kronagent's AWS account id \u2014 the only principal permitted to assume this role.",
       "AllowedPattern": "^\\d{12}$"
     },
     "ExternalId": {
       "Type": "String",
-      "Description": "Unique secret External ID provided by Kronagent for your tenant",
+      "Description": "The per-tenant External ID from your Kronagent console. Without it this role could be assumed on behalf of any Kronagent customer.",
       "MinLength": 16,
-      "MaxLength": 1224
+      "MaxLength": 1224,
+      "NoEcho": true
     },
     "RoleName": {
       "Type": "String",
       "Default": "KronagentObserveRole",
-      "Description": "Name of the IAM role to create"
+      "Description": "Name of the IAM role to create."
     }
   },
   "Resources": {
-    "KronagentObserveRole": {
+    "KronagentRole": {
       "Type": "AWS::IAM::Role",
       "Properties": {
-        "RoleName": { "Ref": "RoleName" },
+        "RoleName": {
+          "Ref": "RoleName"
+        },
+        "Description": "Read-only access for Kronagent to ingest and investigate findings. Grants no ability to change anything in this account.",
         "AssumeRolePolicyDocument": {
           "Version": "2012-10-17",
           "Statement": [
             {
               "Effect": "Allow",
               "Principal": {
-                "AWS": { "Fn::Sub": "arn:aws:iam::${KronagentAccountId}:root" }
+                "AWS": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${KronagentAccountId}:root"
+                }
               },
               "Action": "sts:AssumeRole",
               "Condition": {
                 "StringEquals": {
-                  "sts:ExternalId": { "Ref": "ExternalId" }
+                  "sts:ExternalId": {
+                    "Ref": "ExternalId"
+                  }
                 }
               }
             }
@@ -95,8 +103,13 @@
   },
   "Outputs": {
     "RoleArn": {
-      "Description": "ARN of the created Kronagent Observe IAM Role. Copy this back to Kronagent console.",
-      "Value": { "Fn::GetAtt": ["KronagentObserveRole", "Arn"] }
+      "Description": "Paste this back into Kronagent to finish the observe connection",
+      "Value": {
+        "Fn::GetAtt": [
+          "KronagentRole",
+          "Arn"
+        ]
+      }
     }
   }
 }

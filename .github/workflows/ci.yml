@@ -139,6 +139,35 @@ jobs:
         # executor would pass every existing test.
         run: lint-imports
 
+  templates:
+    name: cloudformation templates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install ".[dev]"
+
+      - name: Committed IAM artifacts match the renderer
+        # deploy/cloudformation/*.json and deploy/kronagent-iam-policy.json are
+        # generated from kronagent/connect.py. Maintained by hand they drifted
+        # four ways, including a contain role that pinned an inline policy name
+        # the adapter never writes — granted, denied, and invisible to any check
+        # that compared action names.
+        run: python3 deploy/publish_templates.py --check
+
+      - name: Templates are valid CloudFormation
+        # Renders as valid JSON is not the same as CloudFormation will accept
+        # it. cfn-lint needs no AWS credentials.
+        run: |
+          pip install cfn-lint
+          cfn-lint deploy/cloudformation/*.json
+
+      - name: The two template forms grant the same thing
+        run: pytest -q tests/test_deploy_templates_match_render.py
+
   build:
     name: container image
     runs-on: ubuntu-latest
