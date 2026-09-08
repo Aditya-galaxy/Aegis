@@ -1056,7 +1056,8 @@ async def slack_interactive(request: Request) -> dict[str, Any]:
 #      written to the same hash-chained audit log.
 # ═══════════════════════════════════════════════════════════════════════════ #
 
-from .connect import (  # noqa: E402 - grouped with the endpoints that use it
+from .connect import (
+    launch_stack_url,  # noqa: E402 - grouped with the endpoints that use it
     ConnectionStore,
     CredentialBroker,
     Grant,
@@ -1264,7 +1265,71 @@ async def connection_template(tenant_id: str, grant: str, request: Request) -> d
             conn, g, kronagent_account_id=account,
             quarantine_nacl_id=settings.quarantine_nacl_id or "QUARANTINE_NACL_ID",
             quarantine_sg_id=settings.quarantine_security_group_id or "QUARANTINE_SG_ID"),
+        "install": _install_instructions(conn, g, account),
     }
+
+
+def _install_instructions(conn, grant, kronagent_account: str) -> dict[str, Any]:
+    """How to install this grant, and which way we recommend.
+
+    `primary` is machine-readable so the console cannot decide differently from
+    the docs. Download is primary for two reasons that hold whether or not a
+    template bucket ever exists:
+
+      - The downloaded template is the BAKED form: our account id and the
+        tenant's External ID are literals. Nothing can be omitted or mistyped.
+        A customer who fat-fingers the parameterized KronagentAccountId creates
+        a role trusting a stranger's AWS account.
+      - The External ID never leaves their terminal. A pre-filled console link
+        carries it in a URL, and therefore into browser history, corporate proxy
+        logs, and the Referer of everything the console loads.
+
+    `launch_url` is null unless a bucket is actually configured — the endpoint
+    that used to live here returned a link to a bucket that does not exist, so
+    the customer's first click landed on a CloudFormation error.
+    """
+    stack = f"kronagent-{grant.value}"
+    out: dict[str, Any] = {
+        "primary": "download",
+        "filename": f"{stack}.json",
+        "command": (f"aws cloudformation deploy --template-file {stack}.json "
+                    f"--stack-name {stack} --capabilities CAPABILITY_NAMED_IAM"),
+        "launch_url": None,
+        "launch_url_unavailable_reason": None,
+    }
+
+    base = settings.aws_template_base_url.rstrip("/")
+    if not base:
+        out["launch_url_unavailable_reason"] = (
+            "KRONAGENT_AWS_TEMPLATE_BASE_URL is not set, so no template bucket "
+            "is published. CloudFormation accepts a TemplateURL only from S3, "
+            "so there is no link to offer. Use the download above.")
+        return out
+
+    params = {"KronagentAccountId": kronagent_account, "ExternalId": conn.external_id}
+    if grant is Grant.CONTAIN:
+        params["QuarantineSecurityGroupId"] = settings.quarantine_security_group_id
+        params["QuarantineNaclId"] = settings.quarantine_nacl_id
+        missing = [k for k, v in params.items() if not v]
+        if missing:
+            out["launch_url_unavailable_reason"] = (
+                f"the hosted contain template requires {sorted(missing)}, which "
+                f"are not configured. An empty value renders a valid ARN that "
+                f"matches nothing, so the role would install cleanly and fail "
+                f"only at containment time.")
+            return out
+
+    try:
+        out["launch_url"] = launch_stack_url(
+            conn, grant,
+            template_url=f"{base}/kronagent-{grant.value}-role.json",
+            parameters=params)
+    except ValueError as exc:
+        # Settings.validate() catches a bad base URL at boot; this catches a
+        # caller that built one some other way, and refuses rather than
+        # emitting a link nobody vetted.
+        out["launch_url_unavailable_reason"] = str(exc)
+    return out
 
 
 @app.post("/api/connections/{tenant_id}/role")

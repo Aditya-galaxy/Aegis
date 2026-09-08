@@ -501,7 +501,37 @@ def render_template(conn: AwsConnection, grant: Grant, *,
     return _cfn_parameterize(body, set(params)) if parameterized else body
 
 
-def launch_stack_url(conn: AwsConnection, grant: Grant, *, template_url: str) -> str:
+# CloudFormation fetches TemplateURL only from S3 (or an SSM document), so this
+# is both a security boundary and a correctness one. Covers the four forms AWS
+# documents: s3.amazonaws.com, s3.<region>.amazonaws.com, <bucket>.s3....
+_S3_HOST_RE = re.compile(
+    r"^(?:[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]\.)?s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com$"
+)
+
+
+def is_cfn_template_url(url: str) -> str:
+    """`""` if this URL may be handed to CloudFormation, else why not.
+
+    Previously only the scheme was checked, so `https://evil.example/t.json`
+    passed. A template URL decides what role the customer creates and who may
+    assume it — an attacker-chosen one is a complete account takeover dressed
+    as an onboarding link.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() != "https":
+        return f"must be https, got {parsed.scheme or 'no scheme'!r}"
+    if "@" in parsed.netloc:
+        return "must not contain userinfo — that is a phishing shape"
+    if not _S3_HOST_RE.match(parsed.hostname or ""):
+        return (f"host {parsed.hostname!r} is not an S3 endpoint. CloudFormation "
+                f"fetches TemplateURL only from S3 or an SSM document")
+    if parsed.query or parsed.fragment:
+        return "must be a plain object URL, with no query string or fragment"
+    return ""
+
+
+def launch_stack_url(conn: AwsConnection, grant: Grant, *, template_url: str,
+                     parameters: Optional[dict[str, str]] = None) -> str:
     """A one-click link that opens CloudFormation with everything pre-filled.
 
     `template_url` must be a publicly readable https URL (an S3 object in our
@@ -520,13 +550,25 @@ def launch_stack_url(conn: AwsConnection, grant: Grant, *, template_url: str) ->
     that opens an empty stack wizard — which looks like it worked right up until
     the customer wonders what to paste.
     """
-    scheme = urllib.parse.urlparse(template_url).scheme.lower()
-    if scheme != "https":
-        raise ValueError(f"template_url must be https, got {scheme or 'no scheme'!r}")
+    problem = is_cfn_template_url(template_url)
+    if problem:
+        raise ValueError(f"template_url {template_url!r}: {problem}")
 
+    # The hosted template is parameterized, so without these the customer lands
+    # on a review screen with ExternalId and KronagentAccountId blank and no way
+    # to know either value. The link was unusable independently of whether the
+    # bucket existed.
+    #
+    # This does put a per-tenant secret in a URL, where it reaches browser
+    # history, corporate proxy logs and the Referer of anything the console
+    # loads. AWS's own partner onboarding works this way and it is accepted
+    # practice — but it is a real cost, and it is why the download +
+    # `aws cloudformation deploy` path stays the documented default: there the
+    # External ID never leaves the customer's terminal.
     query = urllib.parse.urlencode({
         "templateURL": template_url,
         "stackName": f"kronagent-{grant.value}",
+        **{f"param_{k}": v for k, v in sorted((parameters or {}).items())},
     })
     return _CONSOLE_URL.format(region=conn.region) + "?" + query
 

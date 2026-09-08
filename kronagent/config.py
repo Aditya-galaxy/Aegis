@@ -94,6 +94,17 @@ class Settings:
     quarantine_security_group_id: str = ""
     # ID of the pre-provisioned, quarantine network ACL used for blocking IPs.
     quarantine_nacl_id: str = ""
+    # Base URL of the S3 prefix holding the published CloudFormation templates.
+    #
+    # Empty is the default and, today, the only supported state: no bucket is
+    # published. Empty means no one-click launch link is offered and the API
+    # says why, rather than handing a customer a link to a bucket that does not
+    # exist — which is what it used to do.
+    #
+    # This must be S3. CloudFormation fetches TemplateURL only from an S3 object
+    # or an SSM document, so GCS, GitHub Releases and Kronagent's own web server
+    # cannot serve a quick-create link, whatever else they can host.
+    aws_template_base_url: str = ""
     # Optional SQS endpoint override. Empty = the real AWS endpoint. Set it to
     # point the SQS ingestion at a local emulator (moto server / ElasticMQ) for
     # the testbed, or at a VPC/PrivateLink SQS endpoint in production. This is
@@ -216,6 +227,7 @@ class Settings:
             aws_region=os.getenv("AWS_REGION", "us-east-1"),
             quarantine_security_group_id=os.getenv("KRONAGENT_QUARANTINE_SG_ID", ""),
             quarantine_nacl_id=os.getenv("KRONAGENT_QUARANTINE_NACL_ID", ""),
+            aws_template_base_url=os.getenv("KRONAGENT_AWS_TEMPLATE_BASE_URL", "").strip(),
             sqs_endpoint_url=os.getenv("KRONAGENT_SQS_ENDPOINT_URL", ""),
             sqs_wait_seconds=int(os.getenv("KRONAGENT_SQS_WAIT_SECONDS", "20")),
             guardduty_poll_seconds=float(os.getenv("KRONAGENT_GUARDDUTY_POLL_SECONDS", "60")),
@@ -262,6 +274,16 @@ class Settings:
                 f"KRONAGENT_GUARDDUTY_POLL_SECONDS ({self.guardduty_poll_seconds}) must be "
                 f"at least 5 — GuardDuty is rate-limited and a tighter loop would "
                 f"throttle the customer's account.")
+        if self.aws_template_base_url:
+            from .connect import is_cfn_template_url
+            problem = is_cfn_template_url(
+                self.aws_template_base_url.rstrip("/") + "/probe.json")
+            if problem:
+                errors.append(
+                    f"KRONAGENT_AWS_TEMPLATE_BASE_URL ({self.aws_template_base_url}) "
+                    f"{problem}. Fail here rather than at a customer's first "
+                    f"click: a misconfigured value would hand them a template "
+                    f"that grants a role to somebody else's AWS account.")
         if self.sqs_wait_seconds < 0 or self.sqs_wait_seconds > 20:
             errors.append(f"KRONAGENT_SQS_WAIT_SECONDS ({self.sqs_wait_seconds}) must be between 0 and 20.")
         if self.min_severity_for_containment < 0.0 or self.min_severity_for_containment > 10.0:
