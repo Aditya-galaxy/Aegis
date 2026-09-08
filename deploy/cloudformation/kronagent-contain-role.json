@@ -64,6 +64,12 @@
               "Version": "2012-10-17",
               "Statement": [
                 {
+                  "Sid": "ConfirmOwnIdentity",
+                  "Effect": "Allow",
+                  "Action": "sts:GetCallerIdentity",
+                  "Resource": "*"
+                },
+                {
                   "Sid": "DisableAndReenableAccessKeys",
                   "Effect": "Allow",
                   "Action": "iam:UpdateAccessKey",

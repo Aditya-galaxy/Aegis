@@ -277,13 +277,45 @@ def test_contain_policy_grants_every_api_the_adapter_calls(ac: ActionClass):
     )
 
 
-def test_observe_policy_grants_every_api_preflight_probes():
-    """The read side of the same property. Passes today; guards the next probe."""
-    from kronagent.connect import _OBSERVE_PROBES
+@pytest.mark.parametrize("grant_name", ["observe", "contain"])
+def test_each_policy_grants_every_permission_its_own_preflight_probes(grant_name):
+    """A probe the role cannot make reports as a missing permission forever.
 
-    granted = _granted(_observe_policy())
-    missing = {perm for perm, _ in _OBSERVE_PROBES} - granted
-    assert not missing, f"observe policy does not grant probed permissions {sorted(missing)}"
+    Preflight used the observe probe table for BOTH grants. Since the contain
+    policy granted none of those, a correctly installed contain role reported
+    three missing permissions and DEGRADED — permanently, and with no way for
+    the customer to fix it.
+    """
+    from kronagent.connect import _CONTAIN_PROBES, _OBSERVE_PROBES
+
+    probes, policy = (
+        (_OBSERVE_PROBES, _observe_policy())
+        if grant_name == "observe"
+        else (_CONTAIN_PROBES,
+              _contain_policy("123456789012", "us-east-1", "acl-1", "sg-1"))
+    )
+    missing = {perm for perm, _, _ in probes} - _granted(policy)
+    assert not missing, (
+        f"the {grant_name} policy does not grant {sorted(missing)}, which its "
+        f"own preflight probes. Every such probe fails, so the connection can "
+        f"never report healthy."
+    )
+
+
+def test_the_account_mismatch_guard_has_an_oracle_under_every_grant():
+    """The check that containment can only touch the account whose finding
+    produced it reads the account back with sts:GetCallerIdentity. A grant that
+    does not permit it leaves that check with nothing to compare — dead, while
+    still appearing in the source."""
+    for name, policy in (
+        ("observe", _observe_policy()),
+        ("contain", _contain_policy("123456789012", "us-east-1", "acl-1", "sg-1")),
+    ):
+        assert "sts:GetCallerIdentity" in _granted(policy), (
+            f"the {name} policy does not grant sts:GetCallerIdentity, so "
+            f"preflight cannot read back an account id and the mismatch guard "
+            f"silently has nothing to compare."
+        )
 
 
 # --- The value mismatch a name check cannot see ------------------------------
@@ -407,7 +439,10 @@ def test_the_committed_template_scopes_what_can_be_scoped():
     EC2 `Describe*` genuinely does not support resource-level permissions, so
     that one statement is exempt by name rather than by pattern.
     """
-    wildcard_ok = {"ReadStateForRollbackCapture"}
+    # Exempt by Sid, never by pattern. Both are read-only actions AWS genuinely
+    # does not support resource-level permissions for; a pattern-based exemption
+    # would quietly cover the next mutation someone grants on "*".
+    wildcard_ok = {"ReadStateForRollbackCapture", "ConfirmOwnIdentity"}
     offenders = [
         stmt["Sid"] for stmt in _committed_contain_policy()["Statement"]
         if stmt.get("Resource") == "*" and stmt["Sid"] not in wildcard_ok
