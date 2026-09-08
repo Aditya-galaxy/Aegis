@@ -104,29 +104,51 @@ def test_guardduty_polling_accepts_the_brokers_credential_shape(monkeypatch):
     assert seen["credentials"] == BROKER_SHAPED
 
 
-def test_sts_shaped_credentials_are_rejected_loudly(monkeypatch):
+@pytest.fixture
+def fake_boto3(monkeypatch):
+    """A stub `boto3` module in sys.modules, recording client() arguments.
+
+    Not `monkeypatch.setattr("boto3.client", ...)`: that imports boto3, and the
+    core CI job installs no cloud SDK on purpose. These are properties of our
+    own credential handling and must hold in BOTH jobs — skipping them where
+    boto3 is absent would disable them in the job that proves the package works
+    without AWS installed.
+    """
+    import sys
+    import types
+
+    captured: dict = {}
+    stub = types.ModuleType("boto3")
+    stub.client = lambda service, **kw: captured.update(service=service, **kw) or object()
+    monkeypatch.setitem(sys.modules, "boto3", stub)
+    return captured
+
+
+def test_sts_shaped_credentials_are_rejected_loudly():
     """A raw STS response reaching a client must fail immediately and say why.
 
     Passing it through would produce a TypeError from deep inside botocore at
     the first API call — a stack trace that names neither the broker nor the
     consumer, on a code path already wrapped in a swallow-everything handler.
+
+    No boto3 stub needed: the shape check deliberately runs before the import,
+    so a mis-shaped credential dict is rejected whether or not AWS is installed.
     """
-    monkeypatch.setattr("boto3.client", lambda *a, **kw: object(), raising=False)
     with pytest.raises(ValueError, match="AccessKeyId"):
         boto3_client("guardduty", region="us-east-1", credentials=STS_SHAPED)
 
 
-def test_ambient_credentials_are_still_allowed(monkeypatch):
+def test_ambient_credentials_are_still_allowed(fake_boto3):
     """`None` means the process's own credentials — correct for a local
     single-account run, and the default `run_slice.py` falls back to."""
-    captured: dict = {}
-    monkeypatch.setattr(
-        "boto3.client",
-        lambda service, **kw: captured.update(service=service, **kw) or object(),
-        raising=False,
-    )
     boto3_client("ec2", region="eu-west-1", credentials=None)
-    assert captured == {"service": "ec2", "region_name": "eu-west-1"}
+    assert fake_boto3 == {"service": "ec2", "region_name": "eu-west-1"}
+
+
+def test_brokered_credentials_reach_boto3_as_keyword_arguments(fake_boto3):
+    """The splat, end to end, with no AWS SDK present."""
+    boto3_client("ec2", region="eu-west-1", credentials=dict(BROKER_SHAPED))
+    assert fake_boto3 == {"service": "ec2", "region_name": "eu-west-1", **BROKER_SHAPED}
 
 
 # --- 2. Shape: both return paths of credentials() ----------------------------
