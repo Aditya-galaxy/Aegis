@@ -183,15 +183,35 @@ def test_two_tenants_get_different_external_ids_in_their_templates() -> None:
 def test_containment_policy_is_scoped_to_the_customer_account_and_region() -> None:
     conn = _conn(region="eu-west-2")
     tpl = render_template(conn, Grant.CONTAIN, kronagent_account_id=KRONAGENT_ACCOUNT,
-                          quarantine_nacl_id="acl-0abc")
+                          quarantine_nacl_id="acl-0abc", quarantine_sg_id="sg-0def")
     doc = tpl["Resources"]["KronagentRole"]["Properties"]["Policies"][0]["PolicyDocument"]
-    resources = [s["Resource"] for s in doc["Statement"]]
 
-    assert all(CUSTOMER_ACCOUNT in r for r in resources), resources
-    assert any("eu-west-2" in r for r in resources)
+    # A statement's Resource may be a string or a list; every ARN in either must
+    # name the customer's account. Read-only Describe* is the one exemption, and
+    # it is exempt by Sid rather than by pattern: EC2 Describe* genuinely has no
+    # resource-level permissions, and a pattern-based exemption would quietly
+    # cover the next mutation someone grants on "*".
+    read_only = {"ReadStateForRollbackCapture"}
+    mutations = [s for s in doc["Statement"] if s["Sid"] not in read_only]
+    arns = [a for s in mutations
+            for a in ([s["Resource"]] if isinstance(s["Resource"], str)
+                      else s["Resource"])]
+
+    assert arns, "no mutating statements found — has the policy moved?"
+    assert all(CUSTOMER_ACCOUNT in a for a in arns), arns
+    assert all("*" != a for a in arns), f"unscoped mutation: {arns}"
+    assert any("eu-west-2" in a for a in arns)
+
     # The NACL statement must be pinned to one ACL, not every ACL in the account.
-    nacl = [r for r in resources if "network-acl" in r][0]
+    nacl = [a for a in arns if "network-acl" in a][0]
     assert nacl.endswith("acl-0abc")
+
+    # ...and the isolate statement to one security group, for the same reason:
+    # AWS evaluates ModifyInstanceAttribute against the SG named in Groups=, so
+    # this ARN is both required for the call to work and the thing that stops
+    # the role moving an instance into any group it likes.
+    sg = [a for a in arns if "security-group" in a][0]
+    assert sg.endswith("sg-0def")
 
 
 def test_template_is_valid_json_and_readable() -> None:

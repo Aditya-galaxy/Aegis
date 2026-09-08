@@ -291,6 +291,7 @@ class AwsContainmentAdapter:
             nacl = self._quarantine_nacl or "<KRONAGENT_QUARANTINE_NACL_ID unset>"
             return (
                 [
+                    f"ec2.describe_network_acls(NetworkAclIds=['{nacl}'])  # find free rule numbers",
                     f"ec2.create_network_acl_entry(NetworkAclId='{nacl}', RuleNumber=<ingress_rule>, Protocol='-1', RuleAction='deny', Egress=False, CidrBlock='{t}/32')",
                     f"ec2.create_network_acl_entry(NetworkAclId='{nacl}', RuleNumber=<egress_rule>, Protocol='-1', RuleAction='deny', Egress=True, CidrBlock='{t}/32')",
                 ],
