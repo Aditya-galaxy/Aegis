@@ -15,12 +15,13 @@
     },
     "QuarantineSecurityGroupId": {
       "Type": "String",
-      "Description": "ID of your pre-provisioned deny-all Security Group for EC2 isolation (e.g. sg-0123456789abcdef0)"
+      "Description": "Id of the quarantine security group. Kronagent may move an instance into this group and no other.",
+      "AllowedPattern": "^sg-[0-9a-f]+$"
     },
     "QuarantineNaclId": {
       "Type": "String",
-      "Default": "",
-      "Description": "Optional ID of your pre-provisioned Network ACL for IP blocking (e.g. acl-0123456789abcdef0)"
+      "Description": "Id of the network ACL Kronagent may add deny entries to. This role can modify no other NACL.",
+      "AllowedPattern": "^acl-[0-9a-f]+$"
     },
     "RoleName": {
       "Type": "String",
@@ -32,19 +33,25 @@
     "KronagentContainRole": {
       "Type": "AWS::IAM::Role",
       "Properties": {
-        "RoleName": { "Ref": "RoleName" },
+        "RoleName": {
+          "Ref": "RoleName"
+        },
         "AssumeRolePolicyDocument": {
           "Version": "2012-10-17",
           "Statement": [
             {
               "Effect": "Allow",
               "Principal": {
-                "AWS": { "Fn::Sub": "arn:aws:iam::${KronagentAccountId}:root" }
+                "AWS": {
+                  "Fn::Sub": "arn:aws:iam::${KronagentAccountId}:root"
+                }
               },
               "Action": "sts:AssumeRole",
               "Condition": {
                 "StringEquals": {
-                  "sts:ExternalId": { "Ref": "ExternalId" }
+                  "sts:ExternalId": {
+                    "Ref": "ExternalId"
+                  }
                 }
               }
             }
@@ -60,37 +67,74 @@
                   "Sid": "DisableAndReenableAccessKeys",
                   "Effect": "Allow",
                   "Action": "iam:UpdateAccessKey",
-                  "Resource": { "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:user/*" }
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:user/*"
+                  }
                 },
                 {
                   "Sid": "QuarantineDenyAllInlinePolicyOnly",
                   "Effect": "Allow",
-                  "Action": ["iam:PutUserPolicy", "iam:DeleteUserPolicy"],
-                  "Resource": { "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:user/*" },
+                  "Action": [
+                    "iam:PutUserPolicy",
+                    "iam:DeleteUserPolicy"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:user/*"
+                  },
                   "Condition": {
-                    "StringEquals": { "iam:PolicyName": "kronagent-quarantine-deny-all" }
+                    "StringEquals": {
+                      "iam:PolicyName": "kronagent-quarantine-deny-all"
+                    }
                   }
                 },
                 {
                   "Sid": "RevokeRoleSessionsInlinePolicyOnly",
                   "Effect": "Allow",
-                  "Action": ["iam:PutRolePolicy", "iam:DeleteRolePolicy"],
-                  "Resource": { "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:role/*" },
+                  "Action": [
+                    "iam:PutRolePolicy",
+                    "iam:DeleteRolePolicy"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:role/*"
+                  },
                   "Condition": {
-                    "StringEquals": { "iam:PolicyName": "kronagent-revoke-sessions-deny-all" }
+                    "StringEquals": {
+                      "iam:PolicyName": "kronagent-revoke-sessions"
+                    }
                   }
+                },
+                {
+                  "Sid": "ReadStateForRollbackCapture",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:DescribeInstances",
+                    "ec2:DescribeNetworkAcls"
+                  ],
+                  "Resource": "*"
                 },
                 {
                   "Sid": "IsolateEc2InstanceSecurityGroup",
                   "Effect": "Allow",
                   "Action": "ec2:ModifyInstanceAttribute",
-                  "Resource": { "Fn::Sub": "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*" }
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${QuarantineSecurityGroupId}"
+                    }
+                  ]
                 },
                 {
                   "Sid": "BlockIpNaclEntry",
                   "Effect": "Allow",
-                  "Action": ["ec2:CreateNetworkAclEntry", "ec2:ReplaceNetworkAclEntry", "ec2:DeleteNetworkAclEntry"],
-                  "Resource": "*"
+                  "Action": [
+                    "ec2:CreateNetworkAclEntry",
+                    "ec2:DeleteNetworkAclEntry"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-acl/${QuarantineNaclId}"
+                  }
                 }
               ]
             }
@@ -102,7 +146,12 @@
   "Outputs": {
     "RoleArn": {
       "Description": "ARN of the created Kronagent Contain IAM Role. Copy this back to Kronagent console.",
-      "Value": { "Fn::GetAtt": ["KronagentContainRole", "Arn"] }
+      "Value": {
+        "Fn::GetAtt": [
+          "KronagentContainRole",
+          "Arn"
+        ]
+      }
     }
   }
 }

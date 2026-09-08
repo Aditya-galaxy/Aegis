@@ -37,16 +37,22 @@
       }
     },
     {
-      "Sid": "ReadInstanceStateForRollbackCapture",
+      "Sid": "ReadStateForRollbackCapture",
       "Effect": "Allow",
-      "Action": "ec2:DescribeInstances",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeNetworkAcls"
+      ],
       "Resource": "*"
     },
     {
       "Sid": "IsolateInstanceIntoQuarantineSG",
       "Effect": "Allow",
       "Action": "ec2:ModifyInstanceAttribute",
-      "Resource": "arn:aws:ec2:REGION:ACCOUNT_ID:instance/*",
+      "Resource": [
+        "arn:aws:ec2:REGION:ACCOUNT_ID:instance/*",
+        "arn:aws:ec2:REGION:ACCOUNT_ID:security-group/QUARANTINE_SG_ID"
+      ],
       "Condition": {
         "StringEquals": {
           "ec2:Region": "REGION"

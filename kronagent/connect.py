@@ -218,7 +218,8 @@ def _observe_policy() -> dict:
     }
 
 
-def _contain_policy(account_id: str, region: str, quarantine_nacl_id: str) -> dict:
+def _contain_policy(account_id: str, region: str, quarantine_nacl_id: str,
+                    quarantine_sg_id: str = "QUARANTINE_SG_ID") -> dict:
     """Write access, least-privilege, mirroring deploy/kronagent-iam-policy.json.
 
     Deliberately omits ec2:TerminateInstances. Terminate is classified
@@ -255,10 +256,35 @@ def _contain_policy(account_id: str, region: str, quarantine_nacl_id: str) -> di
                 },
             },
             {
+                # Read before write. The adapter captures the instance's current
+                # security groups so the rollback hint can name them, and reads
+                # the quarantine NACL to pick free rule numbers. Both happen
+                # BEFORE the mutation, so without them containment does not
+                # degrade — it fails outright, and ContainmentExecutor swallows
+                # the denial into executed=False during an incident.
+                #
+                # These are the same read-only calls the observe policy already
+                # grants. Containment cannot borrow that grant: it assumes a
+                # different role.
+                "Sid": "ReadStateForRollbackCapture",
+                "Effect": "Allow",
+                "Action": ["ec2:DescribeInstances", "ec2:DescribeNetworkAcls"],
+                "Resource": "*",   # EC2 Describe* does not support resource ARNs
+            },
+            {
                 "Sid": "IsolateInstanceIntoQuarantineSG",
                 "Effect": "Allow",
                 "Action": "ec2:ModifyInstanceAttribute",
-                "Resource": f"arn:aws:ec2:{region}:{account_id}:instance/*",
+                # BOTH ARNs are required. AWS evaluates ModifyInstanceAttribute
+                # against the security group named in Groups= as well as the
+                # instance, so an instance-only grant denies the call — the
+                # action appears granted and containment fails anyway. Naming
+                # the quarantine SG explicitly also means this role can move an
+                # instance into quarantine and nowhere else.
+                "Resource": [
+                    f"arn:aws:ec2:{region}:{account_id}:instance/*",
+                    f"arn:aws:ec2:{region}:{account_id}:security-group/{quarantine_sg_id}",
+                ],
             },
             {
                 "Sid": "BlockIpAtQuarantineNacl",
@@ -272,7 +298,8 @@ def _contain_policy(account_id: str, region: str, quarantine_nacl_id: str) -> di
 
 def render_template(conn: AwsConnection, grant: Grant, *,
                     kronagent_account_id: str,
-                    quarantine_nacl_id: str = "QUARANTINE_NACL_ID") -> dict:
+                    quarantine_nacl_id: str = "QUARANTINE_NACL_ID",
+                    quarantine_sg_id: str = "QUARANTINE_SG_ID") -> dict:
     """The CloudFormation template the customer installs for one grant."""
     if grant is Grant.OBSERVE:
         policy, role_name, desc = (
@@ -282,7 +309,8 @@ def render_template(conn: AwsConnection, grant: Grant, *,
         )
     else:
         policy, role_name, desc = (
-            _contain_policy(conn.account_id, conn.region, quarantine_nacl_id),
+            _contain_policy(conn.account_id, conn.region, quarantine_nacl_id,
+                            quarantine_sg_id),
             "KronagentContainRole",
             "Least-privilege containment access for Kronagent. Install this only "
             "after reviewing the actions below; Kronagent operates read-only "
