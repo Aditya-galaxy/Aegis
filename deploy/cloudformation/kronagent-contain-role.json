@@ -1,41 +1,43 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
-  "Description": "Kronagent Active Containment Cross-Account IAM Role for Automated Remediation",
+  "Description": "Least-privilege containment access for Kronagent. Install this only after reviewing the actions below; Kronagent operates read-only without it.",
   "Parameters": {
     "KronagentAccountId": {
       "Type": "String",
-      "Description": "AWS Account ID of the Kronagent platform (e.g. 123456789012)",
+      "Description": "Kronagent's AWS account id \u2014 the only principal permitted to assume this role.",
       "AllowedPattern": "^\\d{12}$"
     },
     "ExternalId": {
       "Type": "String",
-      "Description": "Unique secret External ID provided by Kronagent for your tenant",
+      "Description": "The per-tenant External ID from your Kronagent console. Without it this role could be assumed on behalf of any Kronagent customer.",
       "MinLength": 16,
-      "MaxLength": 1224
+      "MaxLength": 1224,
+      "NoEcho": true
     },
     "QuarantineSecurityGroupId": {
       "Type": "String",
-      "Description": "Id of the quarantine security group. Kronagent may move an instance into this group and no other.",
+      "Description": "The quarantine security group. This role may move an instance into this group and no other.",
       "AllowedPattern": "^sg-[0-9a-f]+$"
     },
     "QuarantineNaclId": {
       "Type": "String",
-      "Description": "Id of the network ACL Kronagent may add deny entries to. This role can modify no other NACL.",
+      "Description": "The network ACL Kronagent may add deny entries to. This role can modify no other NACL.",
       "AllowedPattern": "^acl-[0-9a-f]+$"
     },
     "RoleName": {
       "Type": "String",
       "Default": "KronagentContainRole",
-      "Description": "Name of the IAM role to create"
+      "Description": "Name of the IAM role to create."
     }
   },
   "Resources": {
-    "KronagentContainRole": {
+    "KronagentRole": {
       "Type": "AWS::IAM::Role",
       "Properties": {
         "RoleName": {
           "Ref": "RoleName"
         },
+        "Description": "Least-privilege containment access for Kronagent. Install this only after reviewing the actions below; Kronagent operates read-only without it.",
         "AssumeRolePolicyDocument": {
           "Version": "2012-10-17",
           "Statement": [
@@ -43,7 +45,7 @@
               "Effect": "Allow",
               "Principal": {
                 "AWS": {
-                  "Fn::Sub": "arn:aws:iam::${KronagentAccountId}:root"
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${KronagentAccountId}:root"
                 }
               },
               "Action": "sts:AssumeRole",
@@ -74,7 +76,7 @@
                   "Effect": "Allow",
                   "Action": "iam:UpdateAccessKey",
                   "Resource": {
-                    "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:user/*"
+                    "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/*"
                   }
                 },
                 {
@@ -85,7 +87,7 @@
                     "iam:DeleteUserPolicy"
                   ],
                   "Resource": {
-                    "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:user/*"
+                    "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/*"
                   },
                   "Condition": {
                     "StringEquals": {
@@ -101,7 +103,7 @@
                     "iam:DeleteRolePolicy"
                   ],
                   "Resource": {
-                    "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:role/*"
+                    "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*"
                   },
                   "Condition": {
                     "StringEquals": {
@@ -116,30 +118,51 @@
                     "ec2:DescribeInstances",
                     "ec2:DescribeNetworkAcls"
                   ],
-                  "Resource": "*"
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "ec2:Region": {
+                        "Fn::Sub": "${AWS::Region}"
+                      }
+                    }
+                  }
                 },
                 {
-                  "Sid": "IsolateEc2InstanceSecurityGroup",
+                  "Sid": "IsolateInstanceIntoQuarantineSG",
                   "Effect": "Allow",
                   "Action": "ec2:ModifyInstanceAttribute",
                   "Resource": [
                     {
-                      "Fn::Sub": "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                      "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
                     },
                     {
-                      "Fn::Sub": "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${QuarantineSecurityGroupId}"
+                      "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${QuarantineSecurityGroupId}"
                     }
-                  ]
+                  ],
+                  "Condition": {
+                    "StringEquals": {
+                      "ec2:Region": {
+                        "Fn::Sub": "${AWS::Region}"
+                      }
+                    }
+                  }
                 },
                 {
-                  "Sid": "BlockIpNaclEntry",
+                  "Sid": "BlockIpAtQuarantineNacl",
                   "Effect": "Allow",
                   "Action": [
                     "ec2:CreateNetworkAclEntry",
                     "ec2:DeleteNetworkAclEntry"
                   ],
                   "Resource": {
-                    "Fn::Sub": "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-acl/${QuarantineNaclId}"
+                    "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-acl/${QuarantineNaclId}"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "ec2:Region": {
+                        "Fn::Sub": "${AWS::Region}"
+                      }
+                    }
                   }
                 }
               ]
@@ -151,10 +174,10 @@
   },
   "Outputs": {
     "RoleArn": {
-      "Description": "ARN of the created Kronagent Contain IAM Role. Copy this back to Kronagent console.",
+      "Description": "Paste this back into Kronagent to finish the contain connection",
       "Value": {
         "Fn::GetAtt": [
-          "KronagentContainRole",
+          "KronagentRole",
           "Arn"
         ]
       }

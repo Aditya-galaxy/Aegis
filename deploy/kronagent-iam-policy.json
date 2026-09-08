@@ -1,6 +1,5 @@
 {
   "Version": "2012-10-17",
-  "Id": "KronagentContainmentLeastPrivilege",
   "Statement": [
     {
       "Sid": "ConfirmOwnIdentity",
@@ -49,7 +48,12 @@
         "ec2:DescribeInstances",
         "ec2:DescribeNetworkAcls"
       ],
-      "Resource": "*"
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:Region": "REGION"
+        }
+      }
     },
     {
       "Sid": "IsolateInstanceIntoQuarantineSG",
@@ -72,7 +76,12 @@
         "ec2:CreateNetworkAclEntry",
         "ec2:DeleteNetworkAclEntry"
       ],
-      "Resource": "arn:aws:ec2:REGION:ACCOUNT_ID:network-acl/QUARANTINE_NACL_ID"
+      "Resource": "arn:aws:ec2:REGION:ACCOUNT_ID:network-acl/QUARANTINE_NACL_ID",
+      "Condition": {
+        "StringEquals": {
+          "ec2:Region": "REGION"
+        }
+      }
     },
     {
       "Sid": "TerminateInstancesInRegion",

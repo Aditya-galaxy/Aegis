@@ -375,10 +375,20 @@ CFN_CONTAIN = (Path(__file__).resolve().parent.parent
 
 
 def _committed_contain_policy() -> dict:
+    """The inline policy on the committed template's IAM role.
+
+    Finds the role rather than naming it: the logical id is an implementation
+    detail of the renderer, and asserting there is exactly one is worth more
+    than asserting what it is called — a template growing a second role is a
+    change nobody should make silently.
+    """
     import json
+
     doc = json.loads(CFN_CONTAIN.read_text(encoding="utf-8"))
-    role = doc["Resources"]["KronagentContainRole"]["Properties"]
-    return role["Policies"][0]["PolicyDocument"]
+    roles = [r for r in doc["Resources"].values()
+             if r["Type"] == "AWS::IAM::Role"]
+    assert len(roles) == 1, f"expected exactly one IAM role, found {len(roles)}"
+    return roles[0]["Properties"]["Policies"][0]["PolicyDocument"]
 
 
 @pytest.mark.parametrize("ac", sorted(_CONTAIN_ACTIONS, key=lambda a: a.value))
@@ -521,9 +531,7 @@ def test_modify_instance_attribute_names_the_quarantine_security_group():
         "standalone": json.loads(STANDALONE_POLICY.read_text(encoding="utf-8")),
     }
     for name, policy in sources.items():
-        resources = _resources(policy, "IsolateEc2Instance"
-                               if name == "cloudformation"
-                               else "IsolateInstanceIntoQuarantineSG")
+        resources = _resources(policy, "IsolateInstanceIntoQuarantineSG")
         assert "security-group" in resources, (
             f"{name}: ec2:ModifyInstanceAttribute is granted on the instance "
             f"only. AWS also evaluates the security-group ARN, so isolation "
