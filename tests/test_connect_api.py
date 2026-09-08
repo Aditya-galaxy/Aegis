@@ -313,3 +313,90 @@ def test_connecting_requires_promote_not_merely_approve(client, tmp_path, monkey
         "tenant_id": "acme", "account_id": CUSTOMER_ACCOUNT, "region": "us-east-1",
         "operator_id": "bob", "token": "bob-tok"})
     assert r.status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# Install instructions: the download path is primary, and the launch link only
+# exists when it can actually work.
+# --------------------------------------------------------------------------- #
+
+def test_the_download_path_is_named_as_primary(client) -> None:
+    """Machine-readable, so the console cannot recommend differently from the
+    docs. Download is primary whether or not a bucket is ever published: the
+    baked template cannot be mistyped, and the External ID never leaves the
+    customer's terminal."""
+    _create(client)
+    install = client.get("/api/connections/acme/template/observe").json()["install"]
+
+    assert install["primary"] == "download"
+    assert install["filename"] == "kronagent-observe.json"
+    assert "aws cloudformation deploy" in install["command"]
+    assert "CAPABILITY_NAMED_IAM" in install["command"], (
+        "the template creates a named IAM role; without this the deploy fails")
+
+
+def test_no_launch_link_is_offered_when_no_bucket_is_published(client) -> None:
+    """The endpoint this replaced returned a link to a bucket that does not
+    exist, so a customer's very first click hit a CloudFormation error. Absent
+    and explained beats present and broken."""
+    _create(client)
+    install = client.get("/api/connections/acme/template/observe").json()["install"]
+
+    assert install["launch_url"] is None
+    assert "not set" in install["launch_url_unavailable_reason"]
+    assert "S3" in install["launch_url_unavailable_reason"]
+
+
+def _with_settings(monkeypatch, **over) -> None:
+    """Settings is frozen — swap the object rather than mutating it.
+
+    Frozen on purpose: configuration that can change under a running process is
+    configuration whose audited value may not be the one that was in force.
+    """
+    import dataclasses
+    monkeypatch.setattr(web, "settings", dataclasses.replace(web.settings, **over))
+
+
+def test_a_configured_bucket_produces_a_prefilled_link(client, monkeypatch) -> None:
+    _create(client)
+    _with_settings(monkeypatch,
+                   aws_template_base_url="https://s3.amazonaws.com/kronagent-templates")
+    body = client.get("/api/connections/acme/template/observe").json()
+    install = body["install"]
+
+    assert install["launch_url_unavailable_reason"] is None
+    assert "console.aws.amazon.com/cloudformation" in install["launch_url"]
+    assert "kronagent-observe-role.json" in install["launch_url"]
+    assert "param_ExternalId" in install["launch_url"]
+    # ...and the download is still what we recommend.
+    assert install["primary"] == "download"
+
+
+def test_no_contain_link_while_the_quarantine_ids_are_unset(client, monkeypatch) -> None:
+    """The hosted contain template needs both quarantine ids. Empty renders a
+    syntactically valid ARN that matches nothing — a role that installs cleanly
+    and fails only at containment time, during an incident."""
+    _create(client)
+    client.post("/api/connections/acme/role", json={
+        "grant": "contain",
+        "role_arn": "arn:aws:iam::123456789012:role/KronagentContainRole",
+        "operator_id": "alice", "token": "t"})
+    _with_settings(monkeypatch,
+                   aws_template_base_url="https://s3.amazonaws.com/kronagent-templates",
+                   quarantine_security_group_id="", quarantine_nacl_id="")
+
+    install = client.get("/api/connections/acme/template/contain").json()["install"]
+    assert install["launch_url"] is None
+    assert "QuarantineNaclId" in install["launch_url_unavailable_reason"]
+
+
+def test_a_bad_base_url_yields_no_link_rather_than_an_unvetted_one(client, monkeypatch) -> None:
+    """Settings.validate() catches this at boot. This is the second layer, for a
+    value that reached the setting some other way — refuse rather than emit a
+    link to a host nobody checked."""
+    _create(client)
+    _with_settings(monkeypatch, aws_template_base_url="https://evil.example/t")
+
+    install = client.get("/api/connections/acme/template/observe").json()["install"]
+    assert install["launch_url"] is None
+    assert "not an S3 endpoint" in install["launch_url_unavailable_reason"]
