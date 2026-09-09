@@ -418,9 +418,19 @@ def test_no_literal_markdown_in_rendered_strings() -> None:
     """Nothing parses markdown in this console — template strings go straight
     into innerHTML. `by **alice**` rendered with the asterisks visible."""
     js = _static("app.js")
+
+    def _is_comment(line: str) -> bool:
+        # `//` was already excluded; a JSDoc block is equally never rendered,
+        # and `/**` trips the `**` check by construction. Excluding comments
+        # does not weaken this: a real offender is a template string, and
+        # template strings are not comments.
+        stripped = line.strip()
+        return (stripped.startswith("//") or stripped.startswith("/*")
+                or stripped.startswith("*") or "//" in line)
+
     rendered = [ln for ln in js.splitlines()
-                if "stageDesc =" in ln or "<p>" in ln]
-    offenders = [ln.strip() for ln in rendered if "**" in ln and "//" not in ln]
+                if ("stageDesc =" in ln or "<p>" in ln) and not _is_comment(ln)]
+    offenders = [ln.strip() for ln in rendered if "**" in ln]
     assert offenders == [], f"literal markdown reaches innerHTML: {offenders}"
 
 
