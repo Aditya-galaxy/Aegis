@@ -152,11 +152,50 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     };
 
-    // Operator ids come from an external registry (or an OIDC claim), so they
-    // reach the warning strings from outside. Escape before injecting.
-    const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({
-        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-    }[c]));
+    // ----------------------------------------------------------------------
+    // Safe-by-default HTML templating.
+    //
+    // Everything this console renders is attacker-influenced. `target` is a
+    // resource id or IP taken verbatim from the finding, so anyone who can name
+    // an EC2 instance, an IAM user or an S3 key chooses that string. The three
+    // *_summary fields are LLM prose derived from the same finding. All of it
+    // was interpolated straight into innerHTML.
+    //
+    // That is stored XSS with an unusually bad blast radius: this console is
+    // the governance surface, and it keeps the operator's APPROVE/PROMOTE token
+    // in sessionStorage. Script running here can approve its own containment
+    // actions, or promote an action class to auto-execute — turning the defence
+    // system into the attack.
+    //
+    // The fix is a tagged template that escapes every interpolation, rather
+    // than 74 hand-placed escape() calls that the 75th render will forget.
+    // Markup composed by this file opts out explicitly via raw().
+    // ----------------------------------------------------------------------
+
+    class SafeHtml {
+        constructor(value) { this.value = String(value); }
+        toString() { return this.value; }
+    }
+
+    /** Mark a string as already-safe markup. Never call this on server data. */
+    const raw = (value) => new SafeHtml(value);
+
+    const escapeHtml = (value) => {
+        if (value instanceof SafeHtml) return value.value;
+        if (value === null || value === undefined) return "";
+        // \x60 is a backtick. Written as an escape so this file contains no
+        // backtick outside an actual template literal — which is what lets the
+        // invariant in tests/test_console_escaping.py pair them reliably.
+        return String(value).replace(/[&<>"'\x60]/g, c => ({
+            "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;",
+            "'": "&#39;", "\x60": "&#96;"
+        }[c]));
+    };
+
+    /** Tagged template: h`<p>${untrusted}</p>` escapes every ${...}. */
+    const h = (strings, ...values) => raw(
+        strings.reduce((out, chunk, i) =>
+            out + chunk + (i < values.length ? escapeHtml(values[i]) : ""), ""));
 
     // Whether the approval queue is still functioning as a control. Deliberately
     // rendered above the queue rather than on a separate dashboard: a metric
@@ -206,28 +245,28 @@ document.addEventListener("DOMContentLoaded", () => {
         // Dry-run
         if (state.status.dry_run) {
             elements.dryRun.className = "status-indicator";
-            elements.dryRun.innerHTML = `<span class="dot yellow"></span> DRY RUN: ACTIVE`;
+            elements.dryRun.innerHTML = h`<span class="dot yellow"></span> DRY RUN: ACTIVE`;
         } else {
             elements.dryRun.className = "status-indicator";
-            elements.dryRun.innerHTML = `<span class="dot green"></span> DRY RUN: REAL DISPATCH`;
+            elements.dryRun.innerHTML = h`<span class="dot green"></span> DRY RUN: REAL DISPATCH`;
         }
 
         // Killswitch
         if (state.status.kill_switch) {
             elements.killSwitch.className = "status-indicator";
-            elements.killSwitch.innerHTML = `<span class="dot red"></span> KILL SWITCH: ENGAGED`;
+            elements.killSwitch.innerHTML = h`<span class="dot red"></span> KILL SWITCH: ENGAGED`;
         } else {
             elements.killSwitch.className = "status-indicator";
-            elements.killSwitch.innerHTML = `<span class="dot green"></span> KILL SWITCH: OFF`;
+            elements.killSwitch.innerHTML = h`<span class="dot green"></span> KILL SWITCH: OFF`;
         }
 
         // Integrity
         if (state.status.integrity_verified) {
             elements.integrity.className = "status-indicator";
-            elements.integrity.innerHTML = `<span class="dot green"></span> LOG INTEGRITY: VERIFIED`;
+            elements.integrity.innerHTML = h`<span class="dot green"></span> LOG INTEGRITY: VERIFIED`;
         } else {
             elements.integrity.className = "status-indicator";
-            elements.integrity.innerHTML = `<span class="dot red"></span> LOG INTEGRITY: COMPROMISED`;
+            elements.integrity.innerHTML = h`<span class="dot red"></span> LOG INTEGRITY: COMPROMISED`;
         }
     };
 
@@ -258,7 +297,7 @@ document.addEventListener("DOMContentLoaded", () => {
             el.style.display = "none";
             return;
         }
-        const stat = (label, value) => `<span class="oversight-stat">
+        const stat = (label, value) => h`<span class="oversight-stat">
             <strong>${value}</strong> ${label}</span>`;
         const decideTime = m.median_seconds_to_decide === null
             ? "—"
@@ -266,7 +305,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         el.style.display = "block";
         el.className = "oversight-banner";
-        el.innerHTML = `
+        el.innerHTML = h`
             <div class="oversight-head">⚠ This approval queue may no longer be a control</div>
             <div class="oversight-stats">
                 ${stat("deny rate", (m.deny_rate * 100).toFixed(1) + "%")}
@@ -274,7 +313,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 ${stat("median time to decide", decideTime)}
             </div>
             <ul class="oversight-warnings">
-                ${m.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}
+                ${m.warnings.map(w => h`<li>${w}</li>`).join("")}
             </ul>`;
     };
 
@@ -288,12 +327,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
         elements.queueEmptyState.style.display = "none";
         elements.queueList.innerHTML = pendingList.map(req => {
-            const plannedCalls = req.planned_api_calls.map(c => `<li>$ ${c}</li>`).join("");
-            const techniques = req.mitre_techniques.map(t => `<span class="tech-tag">${t}</span>`).join("");
+            const plannedCalls = raw(req.planned_api_calls.map(c => h`<li>$ ${c}</li>`).join(""));
+            const techniques = raw(req.mitre_techniques.map(t => h`<span class="tech-tag">${t}</span>`).join(""));
             const severityClass = getSeverityClass(req.severity);
             const severityLabel = getSeverityLabel(req.severity);
 
-            return `
+            return h`
                 <div class="request-card" id="card-${req.request_id}">
                     <div class="request-card-header">
                         <div class="request-meta">
@@ -307,9 +346,9 @@ document.addEventListener("DOMContentLoaded", () => {
                             <p><strong>Finding Target:</strong> ${req.finding_type} (${req.finding_id})</p>
                             <p><strong>Rationale:</strong> <em>${req.rationale}</em></p>
                             <p><strong>Policy gate reason:</strong> ${req.policy_reason}</p>
-                            ${req.threat_intel_summary ? `<p style="margin-top:8px;"><strong>Threat Intelligence:</strong> ${req.threat_intel_summary}</p>` : ""}
-                            ${techniques ? `<div style="margin-top: 4px;">${techniques}</div>` : ""}
-                            ${req.correlation_summary ? `<p style="margin-top:8px;"><strong>Correlation Analysis:</strong> ${req.correlation_summary}</p>` : ""}
+                            ${req.threat_intel_summary ? h`<p style="margin-top:8px;"><strong>Threat Intelligence:</strong> ${req.threat_intel_summary}</p>` : ""}
+                            ${techniques ? h`<div style="margin-top: 4px;">${techniques}</div>` : ""}
+                            ${req.correlation_summary ? h`<p style="margin-top:8px;"><strong>Correlation Analysis:</strong> ${req.correlation_summary}</p>` : ""}
                         </div>
                         
                         <div class="api-box">
@@ -333,7 +372,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const updateAuditUI = () => {
         if (state.audit.length === 0) {
-            elements.auditBody.innerHTML = `<tr><td colspan="4" class="text-center">No audit records found.</td></tr>`;
+            elements.auditBody.innerHTML = h`<tr><td colspan="4" class="text-center">No audit records found.</td></tr>`;
             elements.overviewTimeline.innerHTML = "";
             elements.overviewEmptyState.style.display = "block";
             return;
@@ -351,11 +390,11 @@ document.addEventListener("DOMContentLoaded", () => {
             } else if (event.stage === "policy") {
                 const action = payload.action || {};
                 const decision = payload.decision || {};
-                stageDesc = `Evaluated ${action.action_class} on ${action.target} | Disposition: <strong>${decision.disposition}</strong> (${decision.reason})`;
+                stageDesc = h`Evaluated ${action.action_class} on ${action.target} | Disposition: <strong>${decision.disposition}</strong> (${decision.reason})`;
             } else if (event.stage === "containment") {
-                stageDesc = `Executed ${payload.action_class} on ${payload.target} | Status: <strong>${payload.executed ? 'Executed' : 'Dry-Run/Pending'}</strong> (${payload.detail})`;
+                stageDesc = h`Executed ${payload.action_class} on ${payload.target} | Status: <strong>${payload.executed ? 'Executed' : 'Dry-Run/Pending'}</strong> (${payload.detail})`;
             } else if (event.stage === "approval") {
-                stageDesc = `Human ${payload.decision} for ${payload.action_class} on ${payload.target} by <strong>${payload.operator_id}</strong>`;
+                stageDesc = h`Human ${payload.decision} for ${payload.action_class} on ${payload.target} by <strong>${payload.operator_id}</strong>`;
             } else if (event.stage === "governance") {
                 // `by` covers the system-authored decisions (expiry sweeps and
                 // expiry warnings have no operator behind them); operator_id is
@@ -363,15 +402,15 @@ document.addEventListener("DOMContentLoaded", () => {
                 // operator_id alone rendered those as "by **undefined**".
                 const actor = payload.operator_id || payload.by || "system";
                 if (payload.decision === "allowlist_expired") {
-                    stageDesc = `Autonomy for ${payload.action_class} <strong>lapsed</strong> (TTL elapsed, not renewed) — owner was ${payload.owner || payload.promoted_by}`;
+                    stageDesc = h`Autonomy for ${payload.action_class} <strong>lapsed</strong> (TTL elapsed, not renewed) — owner was ${payload.owner || payload.promoted_by}`;
                 } else if (payload.decision === "allowlist_expiry_warning") {
                     stageDesc = `Warned ${payload.owner} that ${payload.action_class} is about to lapse${payload.notified ? "" : " (delivery failed — entry still expires on schedule)"}`;
                 } else if (payload.decision === "allowlist_review") {
-                    stageDesc = `Allowlist reviewed by <strong>${actor}</strong> — ${(payload.flagged || []).length} of ${payload.entries} entries flagged`;
+                    stageDesc = h`Allowlist reviewed by <strong>${actor}</strong> — ${(payload.flagged || []).length} of ${payload.entries} entries flagged`;
                 } else if (payload.decision === "allowlist_reassign") {
-                    stageDesc = `Ownership of ${payload.action_class} moved ${payload.previous_owner ? `from ${payload.previous_owner} ` : ""}to ${payload.owner} by <strong>${actor}</strong>`;
+                    stageDesc = h`Ownership of ${payload.action_class} moved ${payload.previous_owner ? `from ${payload.previous_owner} ` : ""}to ${payload.owner} by <strong>${actor}</strong>`;
                 } else {
-                    stageDesc = `Allowlist modification: ${payload.decision} of ${payload.action_class} by <strong>${actor}</strong>`;
+                    stageDesc = h`Allowlist modification: ${payload.decision} of ${payload.action_class} by <strong>${actor}</strong>`;
                 }
             } else if (event.stage === "threat_intel") {
                 stageDesc = `Threat intelligence update: *${payload.threat_intel_summary || payload.intel_summary || ''}*`;
@@ -386,7 +425,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 stageDesc = JSON.stringify(payload);
             }
 
-            return `
+            return h`
                 <div class="timeline-item ${event.stage}">
                     <div class="timeline-header">
                         <span class="timeline-title">${event.stage.toUpperCase()} (${event.finding_id})</span>
@@ -410,12 +449,12 @@ document.addEventListener("DOMContentLoaded", () => {
         });
 
         if (filtered.length === 0) {
-            elements.auditBody.innerHTML = `<tr><td colspan="4" class="text-center">No matching audit records found.</td></tr>`;
+            elements.auditBody.innerHTML = h`<tr><td colspan="4" class="text-center">No matching audit records found.</td></tr>`;
             return;
         }
 
         elements.auditBody.innerHTML = filtered.map(event => {
-            return `
+            return h`
                 <tr>
                     <td style="font-family:var(--font-code); font-size:12px; color:var(--text-secondary); white-space:nowrap;">${formatTime(event.ts)}</td>
                     <td><code>${event.finding_id}</code></td>
@@ -439,26 +478,26 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const expiryCell = (entry) => {
         if (!entry.expires_at) {
-            return `<span class="text-muted">never</span>
+            return h`<span class="text-muted">never</span>
                     <div class="cell-sub">standing authority</div>`;
         }
         const ms = new Date(entry.expires_at).getTime() - Date.now();
         if (entry.expired) {
-            return `<span class="text-danger">lapsed ${humanizeMs(ms)} ago</span>
+            return h`<span class="text-danger">lapsed ${humanizeMs(ms)} ago</span>
                     <div class="cell-sub">${formatTime(entry.expires_at)}</div>`;
         }
         const cls = ms <= EXPIRING_SOON_MS ? "text-warning" : "";
-        return `<span class="${cls}">in ${humanizeMs(ms)}</span>
+        return h`<span class="${cls}">in ${humanizeMs(ms)}</span>
                 <div class="cell-sub">${formatTime(entry.expires_at)}</div>`;
     };
 
     const firedCell = (entry) => {
         if (entry.never_fired) {
-            return `<span class="text-muted">never</span>
+            return h`<span class="text-muted">never</span>
                     <div class="cell-sub">authorized nothing since promotion</div>`;
         }
         const ms = Date.now() - new Date(entry.last_fired_at).getTime();
-        return `<span>${humanizeMs(ms)} ago</span>
+        return h`<span>${humanizeMs(ms)} ago</span>
                 <div class="cell-sub">${entry.fire_count}&times; total</div>`;
     };
 
@@ -467,28 +506,28 @@ document.addEventListener("DOMContentLoaded", () => {
     const statusBadges = (entry) => {
         const badges = [];
         if (!entry.known_action_class) {
-            badges.push(`<span class="severity-badge critical">UNKNOWN CLASS</span>`);
+            badges.push(h`<span class="severity-badge critical">UNKNOWN CLASS</span>`);
         } else if (!entry.auto_eligible) {
-            badges.push(`<span class="severity-badge critical">NOT AUTO-ELIGIBLE</span>`);
+            badges.push(h`<span class="severity-badge critical">NOT AUTO-ELIGIBLE</span>`);
         }
         if (entry.expired) {
-            badges.push(`<span class="severity-badge critical">EXPIRED</span>`);
+            badges.push(h`<span class="severity-badge critical">EXPIRED</span>`);
         } else if (entry.expires_at &&
                    new Date(entry.expires_at).getTime() - Date.now() <= EXPIRING_SOON_MS) {
-            badges.push(`<span class="severity-badge high">EXPIRING SOON</span>`);
+            badges.push(h`<span class="severity-badge high">EXPIRING SOON</span>`);
         }
         if (entry.never_fired) {
-            badges.push(`<span class="severity-badge medium">NEVER FIRED</span>`);
+            badges.push(h`<span class="severity-badge medium">NEVER FIRED</span>`);
         } else if (entry.stale) {
-            badges.push(`<span class="severity-badge medium">STALE</span>`);
+            badges.push(h`<span class="severity-badge medium">STALE</span>`);
         }
         if (!entry.expires_at) {
-            badges.push(`<span class="severity-badge medium">NO TTL</span>`);
+            badges.push(h`<span class="severity-badge medium">NO TTL</span>`);
         }
         if (badges.length === 0) {
-            badges.push(`<span class="severity-badge low">ACTIVE</span>`);
+            badges.push(h`<span class="severity-badge low">ACTIVE</span>`);
         }
-        return `<div class="status-badges">${badges.join("")}</div>`;
+        return h`<div class="status-badges">${raw(badges.join(""))}</div>`;
     };
 
     const needsDecision = (entry) =>
@@ -509,7 +548,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const updateAllowlistUI = () => {
         if (state.allowlist.length === 0) {
-            elements.allowlistBody.innerHTML = `<tr><td colspan="6" class="text-center">No allowlist entries configured — every action requires human approval.</td></tr>`;
+            elements.allowlistBody.innerHTML = h`<tr><td colspan="6" class="text-center">No allowlist entries configured — every action requires human approval.</td></tr>`;
             elements.allowlistAttentionCount.textContent = "0 need a decision";
             return;
         }
@@ -524,7 +563,7 @@ document.addEventListener("DOMContentLoaded", () => {
             // promoting on someone else's behalf produces exactly that shape at
             // promotion time, so the claim would be false on every such row. A
             // real reassignment is an audit event, not something the entry shows.
-            return `
+            return h`
                 <tr class="${entry.expired ? "row-lapsed" : ""}">
                     <td>
                         <code>${ac}</code>
