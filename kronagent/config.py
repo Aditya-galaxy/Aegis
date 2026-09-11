@@ -157,6 +157,11 @@ class Settings:
     # --- Audit, approvals & governance ---
     audit_log_path: str = "kronagent_audit.jsonl"
     approval_store_path: str = "kronagent_approvals.json"
+    # Analyst outcomes — what the team actually decided about each finding. The
+    # ground truth shadow mode is scored against (kronagent/shadow.py), so it is
+    # per-tenant like every other store: one tenant's labels must never score
+    # another tenant's decisions.
+    outcome_store_path: str = "kronagent_outcomes.json"
     allowlist_store_path: str = "kronagent_allowlist.json"
     # How far ahead `promote.py warn-expiring` looks when telling owners their
     # grant of autonomy is about to lapse. Long enough that renewing is a
@@ -252,6 +257,7 @@ class Settings:
             onprem_quarantine_vlan=os.getenv("KRONAGENT_ONPREM_QUARANTINE_VLAN", ""),
             audit_log_path=os.getenv("KRONAGENT_AUDIT_PATH", "kronagent_audit.jsonl"),
             approval_store_path=approval_path,
+            outcome_store_path=os.getenv("KRONAGENT_OUTCOME_PATH", "kronagent_outcomes.json"),
             allowlist_store_path=os.getenv("KRONAGENT_ALLOWLIST_PATH", "kronagent_allowlist.json"),
             allowlist_warn_within=os.getenv("KRONAGENT_ALLOWLIST_WARN_WITHIN", "14d"),
             connection_store_path=os.getenv("KRONAGENT_CONNECTION_PATH", "kronagent_connections.json"),

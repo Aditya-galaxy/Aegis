@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import math
 import os
 import random
 import sys
@@ -89,18 +88,11 @@ DEFAULT_EVAL_ALLOWLIST = ",".join([
 # Statistical Utilities
 # --------------------------------------------------------------------------- #
 
-def wilson_score_interval(successes: int, total: int, confidence: float = 0.95) -> tuple[float, float]:
-    """Computes the 95% Wilson score interval for a binomial proportion."""
-    if total == 0:
-        return 0.0, 0.0
-    z = 1.96  # 95% confidence
-    p = successes / total
-    denominator = 1 + z**2 / total
-    centre_adj = p + z**2 / (2 * total)
-    var_adj = z * math.sqrt((p * (1 - p) + z**2 / (4 * total)) / total)
-    lower = (centre_adj - var_adj) / denominator
-    upper = (centre_adj + var_adj) / denominator
-    return max(0.0, lower), min(1.0, upper)
+# The interval now lives in kronagent/stats.py, shared with the shadow-mode
+# report so the two cannot disagree about what "95%" means. Re-exported here
+# because tests and callers import it from run_eval. The copy that used to be
+# here accepted `confidence` and then hard-coded z = 1.96.
+from kronagent.stats import wilson_score_interval  # noqa: E402,F401
 
 
 def bootstrap_f1_interval(actual_verdicts: list[bool], expected_labels: list[bool], n_iterations: int = 1000) -> tuple[float, float]:

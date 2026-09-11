@@ -22,6 +22,8 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
 from .approvals import ApprovalStore, now_iso
+from .outcomes import OutcomeStore
+from .shadow import build_report, calls_from_audit
 from .allowlist import AllowlistStore, DurationError, parse_duration
 from .audit import AuditLog
 from .insights import insight_tags
@@ -180,6 +182,10 @@ def get_audit_log(tenant_id: str) -> AuditLog:
     if "mock" in type(audit_log).__name__.lower():
         return audit_log
     return AuditLog(get_tenant_path(settings.audit_log_path, tenant_id))
+
+
+def get_outcome_store(tenant_id: str) -> OutcomeStore:
+    return OutcomeStore(get_tenant_path(settings.outcome_store_path, tenant_id))
 
 
 def check_view_permission(request: Request):
@@ -377,6 +383,21 @@ def oversight_metrics(request: Request) -> dict[str, Any]:
     store = get_approval_store(tenant_id)
     m = compute_metrics(store.list(status=None))
     return {**m.model_dump(), "healthy": m.healthy}
+
+
+@app.get("/api/shadow/report")
+def shadow_report(request: Request) -> dict[str, Any]:
+    """Kronagent's decisions scored against what the team actually decided.
+
+    Built from the tenant's audit log, which records a triage verdict for every
+    finding — including dismissed ones that never reach an approval queue — and
+    the tenant's recorded analyst outcomes. Every disagreement is included;
+    unlabeled findings are counted but never scored as agreement.
+    """
+    check_view_permission(request)
+    tenant_id = tenant_scope(request)
+    calls = calls_from_audit(get_audit_log(tenant_id).records())
+    return build_report(calls, get_outcome_store(tenant_id).list()).model_dump()
 
 
 @app.post("/api/approvals/{request_id}/action")

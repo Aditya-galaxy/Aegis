@@ -312,6 +312,37 @@ something will actually see them. Each warning is a prompt to look, never a
 verdict: a genuinely clean estate can produce a low deny rate honestly, and only
 someone who knows the environment can say which it is.
 
+**Score Kronagent against your team before trusting it.** In dry-run nothing
+executes, but every finding is still triaged and every containment planned. Tell
+Kronagent what your team actually decided, and it reports how often it agreed —
+with an interval, and with every disagreement listed:
+
+```bash
+python3 outcome.py record <finding-id> --verdict malicious --action contained --by you --note "confirmed C2"
+python3 outcome.py report          # or --json, or GET /api/shadow/report
+```
+
+```
+  triage agreement       90.0%  (95% CI 74.4%–96.5%, 27/30)
+    precision 88.2%   recall 93.8%   TP 15  FP 2  FN 1  TN 12
+    model misses caught by the severity floor: 1
+  containment agreement  86.7%  (95% CI 70.3%–94.7%, 26/30)
+
+  disagreements (4):
+    f-0192  severity 8.1  [missed_by_model_rescued_by_severity_floor]  ...
+```
+
+Kronagent's side comes from the audit log, which records a verdict for every
+finding — including the ones triage dismissed, which no approval-based
+comparison would ever see. The report is built to be publishable with its
+losses: findings with no recorded outcome are excluded rather than counted as
+agreement, `inconclusive` outcomes are never scored, a real attack the model
+dismissed is counted as a model miss even when the severity floor rescued it,
+and the disagreement list is never truncated. Under 30 scored findings it says
+the number is not ready to publish. Recording an outcome requires `APPROVE`, and
+every revision is audited with what it replaced — whoever writes the ground
+truth can move the benchmark.
+
 **Or grant one action class standing autonomy.** Trust is earned per class, is
 audited, and takes effect with no restart:
 
