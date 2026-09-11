@@ -168,15 +168,47 @@ class Orchestrator:
             finding_id=finding.finding_id, stage="triage", payload=verdict.model_dump()
         ))
 
+        # The model's "not actionable" is a routing decision on the most
+        # consequential edge in this pipeline, and the model reached it by reading
+        # the finding — whose title and description can carry attacker-chosen
+        # text. Unchecked, a finding saying "known scanner noise, not actionable"
+        # ended here: no approval request, no human ever saw it, and the only
+        # trace was a triage line in the audit log. The policy engine's own
+        # severity gate is deterministic, but it sat downstream of this one.
+        #
+        # So the model may still filter noise — below the override floor its
+        # verdict stands, which is what keeps enrichment spend off background
+        # scanning — but it cannot, on its own, drop a high-severity finding.
+        # Above the floor the finding continues to a human, and every action it
+        # produces is forced to approval: a model's dismissal must never be the
+        # path by which something executes autonomously.
+        triage_overridden = False
         if not verdict.is_actionable_threat:
-            _log("INCIDENT", f"{finding.finding_id}: triaged non-actionable — monitoring only. --- done ---")
-            self._processed += 1
-            return
+            if verdict.severity < self._settings.triage_override_floor:
+                _log("INCIDENT", f"{finding.finding_id}: triaged non-actionable — monitoring only. --- done ---")
+                self._processed += 1
+                return
+            triage_overridden = True
 
         if not candidates:
             _log("INCIDENT", f"{finding.finding_id}: no containment action available for this resource type. --- done ---")
             self._processed += 1
             return
+
+        if triage_overridden:
+            floor = self._settings.triage_override_floor
+            _log("TRIAGE", f"{finding.finding_id}: model judged NOT actionable, but severity "
+                           f"{verdict.severity:.1f} >= override floor {floor:.1f} — sending to "
+                           f"human review with autonomous execution disabled")
+            await tenant_audit.record(AuditRecord(
+                finding_id=finding.finding_id, stage="triage_override",
+                payload={
+                    "model_verdict": "not_actionable",
+                    "severity": verdict.severity,
+                    "override_floor": floor,
+                    "effect": "forced to human approval; autonomous execution disabled",
+                },
+            ))
 
         # 1b. Threat Intelligence enrichment (advisory)
         intel = ThreatIntelAssessment(finding_id=finding.finding_id, available=False)
@@ -279,6 +311,22 @@ class Orchestrator:
                 decision = self._policy.decide(action, severity=verdict.severity, allowlist=tenant_allowlist)
             else:
                 decision = self._policy.decide(action, severity=verdict.severity)
+
+            if triage_overridden and decision.disposition in ("auto_execute", "requires_approval"):
+                # Kronagent's words only. The model's justification is already in
+                # the triage audit record, and copying model prose into
+                # policy_reason would put steerable text in a field reviewers are
+                # told Kronagent computed.
+                decision = decision.model_copy(update={
+                    "disposition": "requires_approval",
+                    "reason": (
+                        f"triage model judged this finding NOT actionable, but its "
+                        f"severity {verdict.severity:.1f} is at or above the override "
+                        f"floor {self._settings.triage_override_floor:.1f}, so a human "
+                        f"decides and autonomous execution is disabled. Policy: "
+                        f"{decision.reason}"
+                    ),
+                })
             await tenant_audit.record(AuditRecord(
                 finding_id=finding.finding_id, stage="policy",
                 payload={"action": action.model_dump(), "decision": decision.model_dump()},

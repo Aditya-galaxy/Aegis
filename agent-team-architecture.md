@@ -36,7 +36,7 @@ academic [AgentSOC](https://arxiv.org/html/2604.20134v1) / [CORTEX](https://arxi
 frameworks — converge on nearly the same specialized roster, organized in tiers:
 
 **Core operational agents (real-time):**
-- **Triage Agent** — filters false positives, assigns severity, automates 80–90% of Tier-1 alert load. *(We have this.)*
+- **Triage Agent** — filters false positives and automates 80–90% of Tier-1 alert load. Severity is the detector's normalized value, never the model's. Above `KRONAGENT_TRIAGE_OVERRIDE_FLOOR` (default 7.0) a "not actionable" verdict cannot drop a finding on its own: it goes to human approval and never auto-executes, because the model reached that verdict by reading attacker-influenced text. *(We have this.)*
 - **Threat Detection Agent** — behavioral anomaly + signature matching. *(This is upstream of us — GuardDuty/Falco already do it. We consume their output.)*
 - **Response/Containment Agent** — endpoint isolation, credential revocation, etc. *(We have this, but deterministic — see §3 on why that's correct.)*
 

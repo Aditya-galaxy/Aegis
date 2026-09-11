@@ -87,6 +87,16 @@ class Settings:
     # autonomous containment at all; below it, the platform only alerts.
     min_severity_for_containment: float = 4.0
 
+    # A triage model's "not actionable" cannot, on its own, drop a finding at or
+    # above this severity. That verdict is a routing decision on the pipeline's
+    # most consequential edge, made by reading attacker-influenced text: a
+    # finding whose description says "known scanner noise, not actionable" could
+    # otherwise end the pipeline with no approval request and no human ever
+    # seeing it. Above the floor the finding goes to human approval instead, and
+    # can never auto-execute. Below it, triage keeps doing its real job — filtering
+    # noise before any enrichment spend. 7.0 is the start of the "high" band.
+    triage_override_floor: float = 7.0
+
     # --- AWS ---
     aws_region: str = "us-east-1"
     # Name of the pre-provisioned, deny-all quarantine security group used for
@@ -224,6 +234,9 @@ class Settings:
             min_severity_for_containment=float(
                 os.getenv("KRONAGENT_MIN_SEVERITY", "4.0")
             ),
+            triage_override_floor=float(
+                os.getenv("KRONAGENT_TRIAGE_OVERRIDE_FLOOR", "7.0")
+            ),
             aws_region=os.getenv("AWS_REGION", "us-east-1"),
             quarantine_security_group_id=os.getenv("KRONAGENT_QUARANTINE_SG_ID", ""),
             quarantine_nacl_id=os.getenv("KRONAGENT_QUARANTINE_NACL_ID", ""),
@@ -288,6 +301,20 @@ class Settings:
             errors.append(f"KRONAGENT_SQS_WAIT_SECONDS ({self.sqs_wait_seconds}) must be between 0 and 20.")
         if self.min_severity_for_containment < 0.0 or self.min_severity_for_containment > 10.0:
             errors.append(f"KRONAGENT_MIN_SEVERITY ({self.min_severity_for_containment}) must be between 0.0 and 10.0.")
+        if not 0.0 <= self.triage_override_floor <= 10.0:
+            errors.append(
+                f"KRONAGENT_TRIAGE_OVERRIDE_FLOOR ({self.triage_override_floor}) must be "
+                f"between 0.0 and 10.0.")
+        elif (0.0 <= self.min_severity_for_containment <= 10.0
+              and self.triage_override_floor < self.min_severity_for_containment):
+            # Only compared against a valid threshold. An out-of-range
+            # MIN_SEVERITY is already reported above; a second error derived
+            # from the same bad value buries the one worth fixing.
+            errors.append(
+                f"KRONAGENT_TRIAGE_OVERRIDE_FLOOR ({self.triage_override_floor}) is below "
+                f"KRONAGENT_MIN_SEVERITY ({self.min_severity_for_containment}), so it has "
+                f"no effect: findings under the containment threshold are alert-only "
+                f"either way. Set it at or above the containment threshold.")
         if self.max_workers < 1:
             errors.append(f"KRONAGENT_MAX_WORKERS ({self.max_workers}) must be at least 1.")
         if self.trajectory_window_seconds <= 0:
