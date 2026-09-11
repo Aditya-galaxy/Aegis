@@ -477,7 +477,7 @@ python3 -m pip install -r requirements-dev.txt
 python3 -m pytest -q
 ```
 
-670 fully offline, deterministic unit and integration tests passing cleanly. Coverage highlights: the policy engine's safety ceiling (destructive actions proven to never auto-execute, even if allowlisted), the audit log's tamper-evidence (mutation-tested, not just asserted), the behavioral-trajectory guard (scope integrity, runaway rate, and latching — all with injected clocks rather than sleeps), a **cross-provider scope invariant** asserting that every planned action, for every provider, targets a resource its finding actually implicates (mutation-tested against a real defect this caught in the GCP planner), the approval-provider round-trip, forensics-before-containment ordering (mutation-tested), live ingestion against a real SQS server, SQLite/PostgreSQL-backed storage engine persistence, self-serve cloud connection web APIs (`/api/connect/...`), real-time SSE event stream (`/api/events/stream`), OCSF SIEM export (`/api/export/siem`), **cross-tenant isolation at the HTTP boundary** (an operator of one tenant proven unable to read or approve another's containment — mutation-tested), a **cross-provider execution-honesty invariant** proving no adapter can report a containment it did not perform (mutation-tested against real defects in both the GCP and Cloudflare adapters), the **onboarding funnel** (a verified connection starts GuardDuty polling by itself, findings carry their tenant, and the pipeline brokers the customer's assumed role — each guarded by an invariant, mutation-tested), and EU AI Act compliance report generation.
+Fully offline, deterministic unit and integration tests. Coverage highlights: the policy engine's safety ceiling (destructive actions proven to never auto-execute, even if allowlisted), the audit log's tamper-evidence (mutation-tested, not just asserted), the behavioral-trajectory guard (scope integrity, runaway rate, and latching — all with injected clocks rather than sleeps), a **cross-provider scope invariant** asserting that every planned action, for every provider, targets a resource its finding actually implicates (mutation-tested against a real defect this caught in the GCP planner), the approval-provider round-trip, forensics-before-containment ordering (mutation-tested), live ingestion against a real SQS server, SQLite/PostgreSQL-backed storage engine persistence, tenant-scoped cloud connection web APIs (`/api/connections/*`), real-time SSE event stream (`/api/events/stream`), OCSF SIEM export (`/api/export/siem`), **cross-tenant isolation at the HTTP boundary** (an operator of one tenant proven unable to read or approve another's containment — mutation-tested), a **cross-provider execution-honesty invariant** proving no adapter can report a containment it did not perform (mutation-tested against real defects in both the GCP and Cloudflare adapters), the **onboarding funnel** (a verified connection starts GuardDuty polling by itself, findings carry their tenant, and the pipeline brokers the customer's assumed role — each guarded by an invariant, mutation-tested), and EU AI Act compliance report generation.
 
 ---
 
@@ -520,33 +520,36 @@ differs is how much has been wired to real APIs:
 
 ---
 
-## Production Readiness & Category Positioning
+## What is built, and what is not yet
 
-While major competing 2026 AI SOC tools (**Dropzone AI**, **Prophet Security**, **Torq HyperSOC**) stop at investigation and hand verdicts back to analysts, Kronagent executes **autonomous containment** with an **earn-trust governance framework**.
+This section used to be titled *All Phases Completed*. It overclaimed: it listed a
+3-click stack launch that cannot work without a published template bucket, the
+`/api/connect/...` endpoints (deleted because they leaked External IDs), Vault
+signing that was never implemented, SAML that exists only in comments, and a
+26-case benchmark as though shadow mode were finished. What follows is checked
+against the code.
 
-### The 7 Core Production Gaps (Resolved)
+### Built
 
-1. **Packaging & Deployment**: Production Dockerfile, docker-compose, Kubernetes Helm charts (`deploy/helm/`), and CI/CD pipelines.
-2. **Cloud Onboarding**: 3-click AWS CloudFormation stack launch (`deploy/cloudformation/`) with STS `ExternalID` and separate Read-Only vs. Containment IAM role grants.
-3. **Multi-Tenancy & Persistence**: `DatabaseStorageEngine` (`kronagent/storage.py`) providing multi-tenant isolation across SQLite and PostgreSQL backends.
-4. **Distributed Scalability**: Event-driven queue ingestion, telemetry sanitization, and ChatML/LLM prompt injection shielding (`kronagent/sanitization.py`).
-5. **Enterprise Security & KMS**: OIDC/SAML SSO, AWS KMS / Vault audit signing, OCSF SIEM export REST API (`/api/export/siem`), and EU AI Act Article 12/14 compliance engine.
-6. **Modern Web Console**: Web console with Server-Sent Events (`/api/events/stream`) for real-time alert feeds and self-serve connection APIs (`/api/connect/...`).
-7. **Shadow Mode & Evaluation**: Benchmark evaluation harness (`run_eval.py`) measuring precision/recall, 100% CDC, and 0% FPUA across 26 dataset cases.
+1. **Packaging & deployment** — Dockerfile, docker-compose, Helm chart (`deploy/helm/`), and CI running lint, tests on Python 3.11 and 3.13 with and without cloud SDKs, the evaluation gate, and a CloudFormation drift check.
+2. **Cloud onboarding (AWS)** — generated CloudFormation templates for separate read-only and containment roles; STS `AssumeRole` with a per-tenant External ID; preflight that verifies each grant, including that the role belongs to the recorded account, before a connection is marked healthy. The documented install is download + `aws cloudformation deploy`. A one-click console link is offered only when `KRONAGENT_AWS_TEMPLATE_BASE_URL` points at a published bucket, and none is published.
+3. **Multi-tenancy & persistence** — per-tenant stores and audit logs; JSON by default, with SQLite and PostgreSQL engines in `kronagent/storage.py`.
+4. **Ingestion & sanitization** — GuardDuty polling through a connection, SQS, and file replay; identifier masking and prompt-injection shielding before any model call (`kronagent/sanitization.py`).
+5. **Identity & audit** — operator registry with hashed tokens, and OIDC; RBAC (`VIEW` / `APPROVE` / `PROMOTE`) with tenant scoping; hash-chained audit log with optional AWS KMS signing; OCSF export (`/api/export/siem`); EU AI Act Article 12/14 report generation.
+6. **Console** — live updates over Server-Sent Events (`/api/events/stream`); every render escapes by default; model-written context is marked as model-written.
+7. **Evaluation** — `run_eval.py` over 34 synthetic cases, gating containment-decision correctness (CDC) and false-positive-under-authority (FPUA) on the deterministic policy path. Offline triage F1 is ~100% by construction and is not an accuracy claim; only a live run measures triage.
 
----
+### Status against the roadmap
 
-## Phased Production Roadmap (All Phases Completed)
+The phase plan is in [`kronagent_product_roadmap.md`](kronagent_product_roadmap.md).
 
-| Phase | Deliverable | Status |
-|---|---|---|
-| **Phase 0: Containerization & CI/CD** | Multi-stage Dockerfile, docker-compose, GitHub Actions CI workflow, boot config validation (`ConfigError`). | ✅ **Completed** |
-| **Phase 1: Cloud Connect & Onboarding** | Self-serve CloudFormation templates (`deploy/cloudformation/`), STS ExternalID assume role, Read/Write role separation. | ✅ **Completed** |
-| **Phase 2: Telemetry Sanitization & Injection Shielding** | Prompt injection shielding (`<|im_start|>`, `<|system|>`), secret redaction, and `sanitize_telemetry()`. | ✅ **Completed** |
-| **Phase 3: Web Console Real-Time SSE Stream** | Server-Sent Events `/api/events/stream` live status, audit events, and pending approval notifications. | ✅ **Completed** |
-| **Phase 4: Enterprise Auth & OCSF SIEM Export** | Cryptographic audit log verification and `/api/export/siem` REST API for SIEM ingestion. | ✅ **Completed** |
-| **Phase 5: Shadow Mode & Evaluation Harness** | Measured evaluation harness (`run_eval.py`) reporting 100% CDC and 0% FPUA across 26 benchmark cases. | ✅ **Completed** |
-| **Phase 6: Cloud Connection REST APIs & Database Storage Engine** | The tenant-scoped `/api/connections/*` endpoints (list, create, template, role, verify, delete) and `DatabaseStorageEngine` (`kronagent/storage.py`). | ✅ **Completed** |
+| Phase | Status |
+|---|---|
+| **0 · Installable** | ✅ Done. |
+| **1 · Connect flow** | ✅ Built, **not validated live on AWS.** Kubernetes containment is validated end to end on a Kind cluster with Calico enforcing NetworkPolicy. AWS containment has run only against moto and static grant checks; `run_cloud_drill.py --live --tenant <id>` is the burn-in, and it needs an AWS account. |
+| **2 · Shadow mode & measured proof** | 🚧 In progress. The offline gate exists; there is no benchmark from real findings yet. |
+| **3 · Enterprise readiness** | ⬜ Not started. OIDC is implemented; SAML, SOC 2 and a third-party penetration test are not. |
+| **4 · First paid autonomy** | ⬜ Not started. |
 
 For the complete architectural design and safety envelope rationale, see [`agent-team-architecture.md`](agent-team-architecture.md) and [`docs/use-cases.md`](docs/use-cases.md).
 
