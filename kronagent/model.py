@@ -42,6 +42,24 @@ class ResourceRef(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
+def severity_band(score: float) -> str:
+    """The band a 0-10 normalized severity falls in.
+
+    One definition, used by `Finding.severity_band` and by anything that only
+    has the number — the weekly digest bands findings from audit records, which
+    carry a severity but no Finding. Two copies of these thresholds would let the
+    digest and the console report different counts of "high" findings for the
+    same week.
+    """
+    if score >= 9.0:
+        return "critical"
+    if score >= 7.0:
+        return "high"
+    if score >= 4.0:
+        return "medium"
+    return "low"
+
+
 class Finding(BaseModel):
     """Normalized, provider-neutral security finding."""
 
@@ -60,11 +78,4 @@ class Finding(BaseModel):
 
     @property
     def severity_band(self) -> str:
-        s = self.severity
-        if s >= 9.0:
-            return "critical"
-        if s >= 7.0:
-            return "high"
-        if s >= 4.0:
-            return "medium"
-        return "low"
+        return severity_band(self.severity)

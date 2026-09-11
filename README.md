@@ -343,6 +343,15 @@ the number is not ready to publish. Recording an outcome requires `APPROVE`, and
 every revision is audited with what it replaced — whoever writes the ground
 truth can move the benchmark.
 
+**Get a weekly digest.** `python3 run_digest.py` (or `--json`, `--days 14`,
+`--tenant acme`) renders one tenant's week. Anything that means the rest can't
+be trusted comes first: a broken audit chain, a containment that actually
+executed, a week with no findings — which is how an ingestion fault presents —
+or an approval queue that has stopped refusing anything. Then what arrived, what
+Kronagent would have done, and how that compared with the team. It exits 1 when
+there is an alert, so it can run from cron and page someone. It sends nothing,
+and contains no model-written text.
+
 **Or grant one action class standing autonomy.** Trust is earned per class, is
 audited, and takes effect with no restart:
 
