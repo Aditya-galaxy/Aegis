@@ -210,10 +210,48 @@ class Orchestrator:
                 },
             ))
 
-        # 1b. Threat Intelligence enrichment (advisory)
-        intel = ThreatIntelAssessment(finding_id=finding.finding_id, available=False)
+        # 1b/1c. Threat intelligence and correlation, fanned out.
+        #
+        # Neither reads the other's output: intel needs only the finding, and
+        # correlation needs the finding plus `prior`, which was snapshotted from
+        # the tenant's memory before triage. Run one after the other they cost
+        # two model round-trips of wall-clock per actionable finding; together,
+        # one. The commander below is the join — it needs both.
+        #
+        # A TaskGroup rather than gather(): if one agent raises, gather() returns
+        # the error while the other keeps running unattended, and nobody ever
+        # collects its result. A TaskGroup cancels the sibling. Both real agents
+        # already degrade to available=False instead of raising, so this path is
+        # for anything that does not — and it unwraps the ExceptionGroup, so the
+        # worker logs the agent's actual error rather than "unhandled errors in
+        # a TaskGroup".
+        #
+        # Worth knowing: this doubles peak concurrent model calls, from
+        # max_workers to 2 x max_workers. If a provider rate-limits, lower
+        # KRONAGENT_MAX_WORKERS rather than removing the fan-out.
+        async def _intel() -> ThreatIntelAssessment:
+            if self._threat_intel is None:
+                return ThreatIntelAssessment(finding_id=finding.finding_id, available=False)
+            return await self._threat_intel.assess(finding)
+
+        async def _correlate() -> CorrelationAssessment:
+            if self._correlation is None:
+                return CorrelationAssessment(finding_id=finding.finding_id, available=False)
+            return await self._correlation.assess(finding, prior)
+
+        try:
+            async with asyncio.TaskGroup() as enrichment:
+                intel_task = enrichment.create_task(_intel())
+                correlation_task = enrichment.create_task(_correlate())
+        except ExceptionGroup as group:
+            raise group.exceptions[0] from None
+        intel, correlation = intel_task.result(), correlation_task.result()
+
+        # Recorded AFTER both finish and always in this order, never in whichever
+        # order the models happened to answer. The audit log is a hash chain, and
+        # a chain whose record order depends on provider latency is one that two
+        # identical runs cannot reproduce.
         if self._threat_intel is not None:
-            intel = await self._threat_intel.assess(finding)
             await tenant_audit.record(AuditRecord(
                 finding_id=finding.finding_id, stage="threat_intel", payload=intel.model_dump()
             ))
@@ -225,10 +263,7 @@ class Orchestrator:
                               f"{intel.attack_lifecycle_stage or 'n/a'}")
                 _log("INTEL", f"{finding.finding_id}: {intel.intel_summary}")
 
-        # 1c. Investigation / Correlation (advisory)
-        correlation = CorrelationAssessment(finding_id=finding.finding_id, available=False)
         if self._correlation is not None:
-            correlation = await self._correlation.assess(finding, prior)
             await tenant_audit.record(AuditRecord(
                 finding_id=finding.finding_id, stage="correlation", payload=correlation.model_dump()
             ))
@@ -400,7 +435,6 @@ class Orchestrator:
                 
                 # Trigger interactive Slack notification card in a background thread executor
                 from .chatops import ChatOpsNotifier
-                import asyncio
                 
                 ts = await asyncio.to_thread(
                     ChatOpsNotifier.send_approval_notification,
