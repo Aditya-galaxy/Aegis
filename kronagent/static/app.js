@@ -346,10 +346,21 @@ document.addEventListener("DOMContentLoaded", () => {
                             <p><strong>Finding Target:</strong> ${req.finding_type} (${req.finding_id})</p>
                             <p><strong>Rationale:</strong> <em>${req.rationale}</em></p>
                             <p><strong>Policy gate reason:</strong> ${req.policy_reason}</p>
-                            ${req.threat_intel_summary ? h`<p style="margin-top:8px;"><strong>Threat Intelligence:</strong> ${req.threat_intel_summary}</p>` : ""}
-                            ${techniques ? h`<div style="margin-top: 4px;">${techniques}</div>` : ""}
-                            ${req.correlation_summary ? h`<p style="margin-top:8px;"><strong>Correlation Analysis:</strong> ${req.correlation_summary}</p>` : ""}
-                        </div>
+                            </div>
+
+                            <!-- Model-written context. Kept OUT of the box above, which holds only
+                                 what Kronagent computed, because a language model wrote this after
+                                 reading the finding - and the finding contains attacker-chosen text.
+                                 Rendered beside policy_reason in the same style, a reviewer had no
+                                 way to tell Kronagent's reasoning from an LLM's steerable summary. -->
+                            ${req.provenance_warning ? h`<div class="model-context">
+                                <div class="model-context-head">Written by a language model &middot; context, not evidence</div>
+                                <p class="model-context-why">${req.provenance_warning}</p>
+                                ${req.threat_intel_summary ? h`<p><strong>Threat intelligence:</strong> ${req.threat_intel_summary}</p>` : ""}
+                                ${techniques ? h`<div class="model-context-tags"><span class="model-context-label">MITRE (model-mapped):</span> ${techniques}</div>` : ""}
+                                ${req.correlation_summary ? h`<p><strong>Correlation:</strong> ${req.correlation_summary}</p>` : ""}
+                                ${req.incident_narrative ? h`<p><strong>Incident narrative:</strong> ${req.incident_narrative}</p>` : ""}
+                            </div>` : ""}
                         
                         <div class="api-box">
                             <strong>Planned containment API operations:</strong>

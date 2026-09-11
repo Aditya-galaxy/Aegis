@@ -35,6 +35,7 @@ from kronagent.config import Settings
 from kronagent.containment import ContainmentExecutor
 from kronagent.identity import AuthContext, AuthorizationError, Permission, resolve_actor
 from kronagent.insights import insight_tags, tag_labels
+from kronagent.provenance import review_banner
 from kronagent.oversight import (
     HASTY_DECISION_SECONDS,
     MIN_DECISIONS_FOR_SIGNAL,
@@ -107,10 +108,27 @@ def cmd_show(store: ApprovalStore, args: argparse.Namespace) -> int:
         for t in tags:
             print(f"    [{t.label}] ({t.kind}) {t.why}")
         print()
-    if r.threat_intel_summary or r.mitre_techniques:
-        techniques = ", ".join(r.mitre_techniques) or "none mapped"
-        print(f"    threat intel: {r.threat_intel_summary}")
-        print(f"    MITRE ATT&CK: {techniques}")
+    # Everything above this point Kronagent computed or copied from the finding.
+    # Everything in this section a language model wrote after reading the
+    # finding, which contains attacker-chosen text. It is printed separately,
+    # under a header saying so, because side by side with policy_reason there
+    # was no way to tell the two apart.
+    banner = review_banner(r)
+    if banner:
+        print("    -- written by a language model: context, not evidence --")
+        print(f"    {banner}")
+        if r.threat_intel_summary:
+            print(f"    threat intel: {r.threat_intel_summary}")
+        if r.mitre_techniques:
+            print(f"    MITRE ATT&CK (model-mapped): {', '.join(r.mitre_techniques)}")
+        if r.correlation_summary:
+            print(f"    correlation: {r.correlation_summary}")
+        if r.incident_narrative:
+            print(f"    narrative: {r.incident_narrative}")
+        if r.incident_priority:
+            print(f"    model-assigned priority: {r.incident_priority}"
+                  f"{' (flagged to escalate)' if r.escalated else ''}")
+        print("    -- end of model-written context --")
     print("    planned API calls:")
     for c in r.planned_api_calls:
         print(f"      $ {c}")
