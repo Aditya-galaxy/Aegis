@@ -870,3 +870,143 @@ def test_override_floor_does_not_pile_onto_an_invalid_threshold() -> None:
     errors = Settings(min_severity_for_containment=15.0).validate()
     assert any("KRONAGENT_MIN_SEVERITY" in e for e in errors)
     assert not any("TRIAGE_OVERRIDE_FLOOR" in e for e in errors), errors
+
+
+# --------------------------------------------------------------------------- #
+# Enrichment fan-out
+#
+# Threat intel and correlation are independent, so they run concurrently: one
+# model round-trip of wall-clock per actionable finding instead of two. Three
+# properties matter, and each is pinned below: they really do overlap, the audit
+# log records them in a fixed order regardless of which finishes first, and a
+# failing agent cancels its sibling while surfacing its own error.
+# --------------------------------------------------------------------------- #
+
+class _Rendezvous:
+    """Tells each agent whether the other had started before it could finish.
+
+    Run sequentially, the first agent waits out the timeout alone and reports
+    False. Run concurrently, both arrive and both report True.
+    """
+
+    def __init__(self) -> None:
+        self.started: set[str] = set()
+        self.both = asyncio.Event()
+
+    async def enter(self, name: str) -> bool:
+        self.started.add(name)
+        if len(self.started) == 2:
+            self.both.set()
+        try:
+            await asyncio.wait_for(self.both.wait(), timeout=1.0)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+
+class _MeetingIntel(FakeThreatIntel):
+    def __init__(self, rendezvous: _Rendezvous) -> None:
+        super().__init__()
+        self._rendezvous = rendezvous
+        self.overlapped: bool | None = None
+
+    async def assess(self, finding):
+        self.overlapped = await self._rendezvous.enter("intel")
+        return await super().assess(finding)
+
+
+class _MeetingCorrelation(FakeCorrelation):
+    def __init__(self, rendezvous: _Rendezvous) -> None:
+        super().__init__()
+        self._rendezvous = rendezvous
+        self.overlapped: bool | None = None
+
+    async def assess(self, finding, prior):
+        self.overlapped = await self._rendezvous.enter("correlation")
+        return await super().assess(finding, prior)
+
+
+async def test_intel_and_correlation_run_concurrently(settings) -> None:
+    rendezvous = _Rendezvous()
+    intel, correlation = _MeetingIntel(rendezvous), _MeetingCorrelation(rendezvous)
+    candidate = _action("kubernetes", ActionClass.ISOLATE_POD, "pod-1")
+    triage = FakeTriageEngine(_verdict("f-1", actionable=True), candidates=[candidate])
+    approvals = ApprovalStore(settings.approval_store_path)
+    orch, _ = _orchestrator(settings, triage, FakePolicyEngine("requires_approval"),
+                            approvals=approvals, threat_intel=intel, correlation=correlation)
+    item, _ = _queued(_finding(finding_id="f-1"))
+
+    await _drain(orch, [item])
+
+    assert intel.overlapped is True and correlation.overlapped is True, (
+        "intel and correlation did not overlap — they ran one after the other")
+    # Concurrency must not cost the join: both results still reach the request.
+    assert approvals.list(status="pending")[0].threat_intel_summary == "scripted intel summary"
+
+
+class _SlowIntel(FakeThreatIntel):
+    async def assess(self, finding):
+        await asyncio.sleep(0.05)
+        return await super().assess(finding)
+
+
+async def test_enrichment_is_audited_in_a_fixed_order_whatever_finishes_first(settings) -> None:
+    """Correlation answers first here. The audit log is a hash chain, and a
+    chain whose record order depends on provider latency cannot be reproduced
+    by two identical runs — so intel is still recorded first."""
+    candidate = _action("kubernetes", ActionClass.ISOLATE_POD, "pod-1")
+    triage = FakeTriageEngine(_verdict("f-1", actionable=True), candidates=[candidate])
+    orch, _ = _orchestrator(settings, triage, FakePolicyEngine("requires_approval"),
+                            approvals=ApprovalStore(settings.approval_store_path),
+                            threat_intel=_SlowIntel(), correlation=FakeCorrelation())
+    item, _ = _queued(_finding(finding_id="f-1"))
+
+    await _drain(orch, [item])
+
+    stages = [r["stage"] for r in _audit_records(settings)]
+    assert stages.index("threat_intel") < stages.index("correlation"), stages
+
+
+class _ExplodingIntel:
+    async def assess(self, finding):
+        await asyncio.sleep(0.01)
+        raise RuntimeError("intel agent exploded")
+
+
+class _SlowCorrelation(FakeCorrelation):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelled = False
+        self.finished = False
+
+    async def assess(self, finding, prior):
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        self.finished = True
+        return await super().assess(finding, prior)
+
+
+async def test_a_failing_enrichment_agent_cancels_its_sibling(settings, capsys) -> None:
+    """Both real agents degrade instead of raising, so this guards anything that
+    does not. With gather() the failure would return while correlation kept
+    running unattended; a TaskGroup cancels it. And the worker must log the
+    agent's real error, not "unhandled errors in a TaskGroup"."""
+    correlation = _SlowCorrelation()
+    candidate = _action("kubernetes", ActionClass.ISOLATE_POD, "pod-1")
+    triage = FakeTriageEngine(_verdict("f-1", actionable=True), candidates=[candidate])
+    approvals = ApprovalStore(settings.approval_store_path)
+    orch, _ = _orchestrator(settings, triage, FakePolicyEngine("requires_approval"),
+                            approvals=approvals, threat_intel=_ExplodingIntel(),
+                            correlation=correlation)
+    item, _ = _queued(_finding(finding_id="f-1"))
+
+    await _drain(orch, [item])
+
+    out = capsys.readouterr().out
+    assert correlation.cancelled and not correlation.finished
+    assert "RuntimeError: intel agent exploded" in out
+    assert "ExceptionGroup" not in out
+    assert approvals.list(status="pending") == []
