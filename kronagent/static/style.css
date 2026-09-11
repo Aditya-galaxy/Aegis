@@ -926,3 +926,35 @@ code {
     line-height: 1.5;
 }
 .oversight-warnings li { margin-bottom: 6px; }
+
+/* Model-written context. Visually separate from the deterministic intel box on
+   purpose: a language model wrote this after reading attacker-influenced
+   telemetry, so it must never read as Kronagent's own reasoning. Dashed border
+   and a muted violet — distinct, but not an alarm, since it is usually useful. */
+.model-context {
+    margin-top: 12px;
+    padding: 10px 14px;
+    border: 1px dashed #8b5cf6;
+    border-radius: 6px;
+    background: rgba(139, 92, 246, 0.06);
+}
+.model-context-head {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #a78bfa;
+    margin-bottom: 4px;
+}
+.model-context-why {
+    font-size: 0.8rem;
+    opacity: 0.8;
+    margin: 0 0 8px;
+}
+.model-context p { margin: 6px 0; }
+.model-context-label {
+    font-size: 0.78rem;
+    opacity: 0.8;
+    margin-right: 4px;
+}
+.model-context-tags { margin-top: 4px; }

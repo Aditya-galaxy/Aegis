@@ -25,6 +25,7 @@ from .approvals import ApprovalStore, now_iso
 from .allowlist import AllowlistStore, DurationError, parse_duration
 from .audit import AuditLog
 from .insights import insight_tags
+from .provenance import provenance_map, review_banner
 from .oversight import compute_metrics
 from .identity import (
     DEFAULT_TENANT,
@@ -353,7 +354,14 @@ def list_approvals(request: Request) -> list[Any]:
     tenant_id = tenant_scope(request)
     store = get_approval_store(tenant_id)
     return [{**r.model_dump(),
-             "insight_tags": [t.model_dump() for t in insight_tags(r)]}
+             "insight_tags": [t.model_dump() for t in insight_tags(r)],
+             # Which parts of this record a model wrote. The console renders the
+             # model-written prose in its own block; without this it would sit
+             # beside policy_reason in the same typeface, and a reviewer would
+             # have no way to tell Kronagent's reasoning from an LLM's summary
+             # of attacker-supplied telemetry.
+             "provenance": provenance_map(r),
+             "provenance_warning": review_banner(r)}
             for r in store.list()]
 
 
