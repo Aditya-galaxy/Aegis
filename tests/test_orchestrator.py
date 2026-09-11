@@ -734,3 +734,139 @@ async def test_trajectory_runaway_halt_blocks_subsequent_actions(settings) -> No
     stages = [json.loads(l)["record"]["stage"] for l in open(settings.audit_log_path) if l.strip()]
     assert "trajectory_halt" in stages
     assert acked() == 1
+
+
+# --------------------------------------------------------------------------- #
+# Triage override floor
+#
+# Triage's "not actionable" used to end the pipeline unconditionally. The model
+# reaches that verdict by reading the finding, whose title and description can
+# carry attacker-chosen text — so "known scanner noise, not actionable" in a
+# finding could stop containment of a real attack with no approval request and
+# no human ever seeing it. Above the floor a human now decides, and nothing the
+# finding produces may auto-execute.
+# --------------------------------------------------------------------------- #
+
+def _floor_settings(settings, floor: float = 7.0):
+    import dataclasses
+    return dataclasses.replace(settings, triage_override_floor=floor)
+
+
+def _audit_records(settings) -> list[dict]:
+    return [json.loads(l)["record"] for l in open(settings.audit_log_path) if l.strip()]
+
+
+async def test_a_model_cannot_silently_drop_a_high_severity_finding(settings) -> None:
+    settings = _floor_settings(settings)
+    candidate = _action("kubernetes", ActionClass.ISOLATE_POD, "pod-1")
+    triage = FakeTriageEngine(_verdict("f-1", actionable=False, severity=8.0),
+                              candidates=[candidate])
+    approvals = ApprovalStore(settings.approval_store_path)
+    orch, _ = _orchestrator(settings, triage, FakePolicyEngine("requires_approval"),
+                            approvals=approvals)
+    item, _ = _queued(_finding(finding_id="f-1", severity=8.0))
+
+    await _drain(orch, [item])
+
+    pending = approvals.list(status="pending")
+    assert len(pending) == 1, "a high-severity finding the model dismissed vanished"
+    assert "NOT actionable" in pending[0].policy_reason
+    # policy_reason is deterministic: the model's own words must not be in it.
+    assert "test justification" not in pending[0].policy_reason
+
+
+async def test_an_overridden_finding_never_auto_executes(settings) -> None:
+    """The load-bearing half. Allowlisted, reversible, single-resource — policy
+    says auto-execute — and it still waits for a human, because the only reason
+    it reached policy at all is that a model's dismissal was overruled."""
+    settings = _floor_settings(settings)
+    candidate = _action("kubernetes", ActionClass.ISOLATE_POD, "pod-1")
+    triage = FakeTriageEngine(_verdict("f-1", actionable=False, severity=9.0),
+                              candidates=[candidate])
+    approvals = ApprovalStore(settings.approval_store_path)
+    orch, _ = _orchestrator(settings, triage, FakePolicyEngine("auto_execute"),
+                            approvals=approvals)
+    item, _ = _queued(_finding(finding_id="f-1", severity=9.0))
+
+    await _drain(orch, [item])
+
+    records = _audit_records(settings)
+    contained = [r for r in records if r["stage"] == "containment"]
+    assert contained and all(r["payload"]["executed"] is False for r in contained)
+    assert all(r["payload"]["decision"]["disposition"] == "requires_approval"
+               for r in records if r["stage"] == "policy")
+    assert len(approvals.list(status="pending")) == 1
+
+
+async def test_below_the_floor_triage_still_filters_noise(settings) -> None:
+    """The floor must not turn every dismissal into an approval request. Below
+    it the verdict stands, and policy is never consulted."""
+    settings = _floor_settings(settings)
+    candidate = _action("kubernetes", ActionClass.ISOLATE_POD, "pod-1")
+    triage = FakeTriageEngine(_verdict("f-1", actionable=False, severity=5.0),
+                              candidates=[candidate])
+    approvals = ApprovalStore(settings.approval_store_path)
+    policy = FakePolicyEngine("auto_execute")
+    orch, _ = _orchestrator(settings, triage, policy, approvals=approvals)
+    item, _ = _queued(_finding(finding_id="f-1", severity=5.0))
+
+    await _drain(orch, [item])
+
+    assert policy.decide_calls == []
+    assert approvals.list(status="pending") == []
+
+
+async def test_the_override_is_audited(settings) -> None:
+    settings = _floor_settings(settings)
+    candidate = _action("kubernetes", ActionClass.ISOLATE_POD, "pod-1")
+    triage = FakeTriageEngine(_verdict("f-1", actionable=False, severity=8.0),
+                              candidates=[candidate])
+    orch, _ = _orchestrator(settings, triage, FakePolicyEngine("requires_approval"),
+                            approvals=ApprovalStore(settings.approval_store_path))
+    item, _ = _queued(_finding(finding_id="f-1", severity=8.0))
+
+    await _drain(orch, [item])
+
+    overrides = [r for r in _audit_records(settings) if r["stage"] == "triage_override"]
+    assert len(overrides) == 1
+    assert overrides[0]["payload"]["severity"] == 8.0
+    assert overrides[0]["payload"]["override_floor"] == 7.0
+
+
+async def test_a_policy_block_still_wins_over_the_override(settings) -> None:
+    """The override widens what a human sees; it never widens what may run. A
+    kill switch or containment threshold block stays a block."""
+    settings = _floor_settings(settings)
+    candidate = _action("kubernetes", ActionClass.ISOLATE_POD, "pod-1")
+    triage = FakeTriageEngine(_verdict("f-1", actionable=False, severity=8.0),
+                              candidates=[candidate])
+    approvals = ApprovalStore(settings.approval_store_path)
+    orch, _ = _orchestrator(settings, triage, FakePolicyEngine("blocked"),
+                            approvals=approvals)
+    item, _ = _queued(_finding(finding_id="f-1", severity=8.0))
+
+    await _drain(orch, [item])
+
+    assert approvals.list(status="pending") == []
+    assert all(r["payload"]["decision"]["disposition"] == "blocked"
+               for r in _audit_records(settings) if r["stage"] == "policy")
+
+
+def test_override_floor_configuration() -> None:
+    from kronagent.config import Settings
+
+    assert Settings().triage_override_floor == 7.0
+    assert any("TRIAGE_OVERRIDE_FLOOR" in e for e in
+               Settings(triage_override_floor=11.0).validate())
+    below = Settings(triage_override_floor=3.0, min_severity_for_containment=4.0).validate()
+    assert any("no effect" in e for e in below), below
+
+
+def test_override_floor_does_not_pile_onto_an_invalid_threshold() -> None:
+    """One bad value, one error. An out-of-range MIN_SEVERITY is the thing to
+    fix; reporting the floor as 'below' it too would bury that."""
+    from kronagent.config import Settings
+
+    errors = Settings(min_severity_for_containment=15.0).validate()
+    assert any("KRONAGENT_MIN_SEVERITY" in e for e in errors)
+    assert not any("TRIAGE_OVERRIDE_FLOOR" in e for e in errors), errors
