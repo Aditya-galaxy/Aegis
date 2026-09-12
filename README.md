@@ -581,7 +581,7 @@ against the code.
 
 ### Status against the roadmap
 
-The phase plan is in [`kronagent_product_roadmap.md`](kronagent_product_roadmap.md).
+Phases below follow the internal phase plan, which is not published in this repository. The status is summarised here so this file stands on its own.
 
 | Phase | Status |
 |---|---|
